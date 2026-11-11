@@ -36,9 +36,10 @@ type RankedResult struct {
 	Next      string
 }
 type RankedOptions struct {
-	Limit int
-	After string
-	Scope string
+	Limit       int
+	After       string
+	Scope       string
+	Concurrency int
 }
 type rankedCursor struct {
 	Generation string `json:"g"`
@@ -57,11 +58,14 @@ type rankedHit struct {
 // scope or index generation invalidates the cursor. Every page reads all
 // candidate payloads, so common queries can be expensive.
 func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOptions, decode func(string, []byte) (RankedFields, bool, error)) (RankedResult, error) {
-	if decode == nil || options.Limit < 0 || options.Limit > 1000 {
+	if decode == nil || options.Limit < 0 || options.Limit > 1000 || options.Concurrency < 0 || options.Concurrency > maxFindReads {
 		return RankedResult{}, errors.New("zenbun: invalid ranked search options")
 	}
 	if options.Limit == 0 {
 		options.Limit = 20
+	}
+	if options.Concurrency == 0 {
+		options.Concurrency = defaultFindReads
 	}
 	if err := q.validate(); err != nil {
 		return RankedResult{}, err
@@ -90,12 +94,17 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		return RankedResult{}, err
 	}
 	hits := make([]rankedHit, 0, len(keys))
-	for _, key := range keys {
+	bodies := readAhead(ctx, keys, options.Concurrency, func(ctx context.Context, key string) ([]byte, bool, error) {
 		data, err := s.Get(ctx, key)
-		if err != nil {
-			return RankedResult{}, err
+		return data, true, err
+	})
+	defer bodies.stop()
+	for _, key := range keys {
+		body := bodies.next()
+		if body.err != nil {
+			return RankedResult{}, body.err
 		}
-		fields, include, err := decode(key, data)
+		fields, include, err := decode(key, body.data)
 		if err != nil {
 			return RankedResult{}, err
 		}
