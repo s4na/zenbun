@@ -16,7 +16,7 @@ import (
 const (
 	maxQueryGroups     = 16
 	maxQueryWords      = 64
-	maxQueryWordBytes  = 256
+	maxQueryWordBytes  = 512
 	maxFindContext     = 20
 	defaultFindLimit   = 20
 	defaultFindBytes   = 16 << 10
