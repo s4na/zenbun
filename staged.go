@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -18,7 +19,10 @@ func (m *SnapshotMirror) Stage(ctx context.Context, base string, changes []Snaps
 	} else {
 		s, err := m.OpenSnapshot(ctx, base)
 		if err != nil {
-			return nil, err
+			if errors.Is(err, ErrNotFound) {
+				return nil, fmt.Errorf("zenbun: staged base not found; published snapshots are not staged generations: %w", err)
+			}
+			return nil, fmt.Errorf("zenbun: open staged base: %w", err)
 		}
 		state = s.manifest
 	}

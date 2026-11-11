@@ -55,11 +55,15 @@ func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotC
 	if len(changes) == 0 {
 		return nil
 	}
+	docs, err := snapshotDocuments(changes)
+	if err != nil {
+		return err
+	}
 	state, etag, err := m.index.loadManifest(ctx)
 	if err != nil {
 		return err
 	}
-	ref, err := m.prepareDocuments(ctx, changes)
+	ref, err := m.writeDocuments(ctx, changes, docs)
 	if err != nil {
 		return err
 	}
@@ -68,13 +72,21 @@ func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotC
 }
 
 func (m *SnapshotMirror) prepareDocuments(ctx context.Context, changes []SnapshotChange) (segmentRef, error) {
+	docs, err := snapshotDocuments(changes)
+	if err != nil {
+		return segmentRef{}, err
+	}
+	return m.writeDocuments(ctx, changes, docs)
+}
+
+func snapshotDocuments(changes []SnapshotChange) (map[string]indexedDocument, error) {
 	docs := make(map[string]indexedDocument, len(changes))
 	for _, c := range changes {
 		if !validMirrorKey(c.Key) || (!c.Delete && !utf8.ValidString(c.Text)) {
-			return segmentRef{}, errors.New("zenbun: invalid document key or UTF-8 content")
+			return nil, errors.New("zenbun: invalid document key or UTF-8 content")
 		}
 		if _, ok := docs[c.Key]; ok {
-			return segmentRef{}, errors.New("zenbun: duplicate key in batch")
+			return nil, errors.New("zenbun: duplicate key in batch")
 		}
 		doc := indexedDocument{Deleted: c.Delete}
 		if !c.Delete {
@@ -84,6 +96,10 @@ func (m *SnapshotMirror) prepareDocuments(ctx context.Context, changes []Snapsho
 		}
 		docs[c.Key] = doc
 	}
+	return docs, nil
+}
+
+func (m *SnapshotMirror) writeDocuments(ctx context.Context, changes []SnapshotChange, docs map[string]indexedDocument) (segmentRef, error) {
 	for _, c := range changes {
 		if c.Delete {
 			continue
