@@ -141,11 +141,7 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		if rankMatches(fields.Title, q) {
 			hit.priority = 2
 		}
-		words := make([]string, 0, len(q.All))
-		for _, group := range q.All {
-			words = append(words, group...)
-		}
-		if len(words) > 0 && normalize(fields.Title) == normalize(strings.Join(words, " ")) {
+		if exactRankedTitle(fields.Title, q) {
 			hit.priority = 3
 		}
 		if rankMatches(strings.Join(fields.Tags, "\n"), q) {
@@ -215,6 +211,32 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		result.Next = base64.RawURLEncoding.EncodeToString(raw)
 	}
 	return result, nil
+}
+
+// exactRankedTitle accepts one alternative from each group, as well as the
+// complete query phrase (including alternatives) in their original order.
+func exactRankedTitle(title string, q Query) bool {
+	title = normalize(title)
+	var words []string
+	positions := map[int]bool{0: true}
+	for i, group := range q.All {
+		next := make(map[int]bool)
+		for _, word := range group {
+			word = normalize(word)
+			words = append(words, word)
+			for pos := range positions {
+				prefix := word
+				if i > 0 {
+					prefix = " " + prefix
+				}
+				if strings.HasPrefix(title[pos:], prefix) {
+					next[pos+len(prefix)] = true
+				}
+			}
+		}
+		positions = next
+	}
+	return len(q.All) > 0 && (positions[len(title)] || title == strings.Join(words, " "))
 }
 func rankMatches(text string, q Query) bool {
 	text = normalize(text)
