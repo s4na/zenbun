@@ -65,6 +65,9 @@ func TestStageCompactsUpdatesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(latest.manifest.Segments) >= 9 {
+		t.Fatalf("expected compaction after 9 updates; segments=%d", len(latest.manifest.Segments))
+	}
 	old, err := m.OpenSnapshot(ctx, first.Generation())
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +133,22 @@ func TestApplyDocumentsValidatesBeforeReadingIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = m.ApplyDocuments(t.Context(), []SnapshotChange{{Key: "a", Text: "one"}, {Key: "a", Text: "two"}})
+	if err == nil || !strings.Contains(err.Error(), "duplicate") || store.reads != 0 {
+		t.Fatalf("validation: %v, reads=%d", err, store.reads)
+	}
+}
+
+func TestStageValidatesBeforeReadingBase(t *testing.T) {
+	store := &unavailableIndexStore{MemoryStore: &MemoryStore{}}
+	idx, err := Open(store, "idx/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewSnapshotMirror(idx, store, "copies/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Stage(t.Context(), strings.Repeat("a", 32), []SnapshotChange{{Key: "a", Text: "one"}, {Key: "a", Text: "two"}})
 	if err == nil || !strings.Contains(err.Error(), "duplicate") || store.reads != 0 {
 		t.Fatalf("validation: %v, reads=%d", err, store.reads)
 	}

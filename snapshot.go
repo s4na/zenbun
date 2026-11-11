@@ -71,14 +71,6 @@ func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotC
 	return m.index.publish(ctx, state, etag)
 }
 
-func (m *SnapshotMirror) prepareDocuments(ctx context.Context, changes []SnapshotChange) (segmentRef, error) {
-	docs, err := snapshotDocuments(changes)
-	if err != nil {
-		return segmentRef{}, err
-	}
-	return m.writeDocuments(ctx, changes, docs)
-}
-
 func snapshotDocuments(changes []SnapshotChange) (map[string]indexedDocument, error) {
 	docs := make(map[string]indexedDocument, len(changes))
 	for _, c := range changes {

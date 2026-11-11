@@ -13,6 +13,14 @@ import (
 // caller's responsibility. The index must be dedicated to staged snapshots;
 // Index.Reclaim cannot be used on it because it only sees the current manifest.
 func (m *SnapshotMirror) Stage(ctx context.Context, base string, changes []SnapshotChange) (*Snapshot, error) {
+	var docs map[string]indexedDocument
+	if len(changes) > 0 {
+		var err error
+		docs, err = snapshotDocuments(changes)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var state manifest
 	if base == "" {
 		state = manifest{Version: manifestVersion}
@@ -27,7 +35,7 @@ func (m *SnapshotMirror) Stage(ctx context.Context, base string, changes []Snaps
 		state = s.manifest
 	}
 	if len(changes) > 0 {
-		ref, err := m.prepareDocuments(ctx, changes)
+		ref, err := m.writeDocuments(ctx, changes, docs)
 		if err != nil {
 			return nil, err
 		}
