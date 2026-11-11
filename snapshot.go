@@ -33,12 +33,29 @@ func NewSnapshotMirror(index *Index, store Store, prefix string) (*SnapshotMirro
 // publication leaves the previous generation intact. Unreferenced copies and
 // segments can remain after failures. ETag on Change is ignored.
 func (m *SnapshotMirror) Apply(ctx context.Context, changes []Change) error {
+	documents := make([]SnapshotChange, len(changes))
+	for i, c := range changes {
+		documents[i] = SnapshotChange{Key: c.Key, Text: string(c.Data), Data: c.Data, Delete: c.Delete}
+	}
+	return m.ApplyDocuments(ctx, documents)
+}
+
+// SnapshotChange separates searchable text from the stored document payload.
+type SnapshotChange struct {
+	Key    string
+	Text   string
+	Data   []byte
+	Delete bool
+}
+
+// ApplyDocuments atomically publishes searchable text and immutable payloads.
+func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotChange) error {
 	if len(changes) == 0 {
 		return nil
 	}
 	docs := make(map[string]indexedDocument, len(changes))
 	for _, c := range changes {
-		if !validMirrorKey(c.Key) || (!c.Delete && !utf8.Valid(c.Data)) {
+		if !validMirrorKey(c.Key) || (!c.Delete && !utf8.ValidString(c.Text)) {
 			return errors.New("zenbun: invalid document key or UTF-8 content")
 		}
 		if _, ok := docs[c.Key]; ok {
@@ -48,7 +65,7 @@ func (m *SnapshotMirror) Apply(ctx context.Context, changes []Change) error {
 		if !c.Delete {
 			hash := sha256.Sum256(c.Data)
 			doc.ETag = hex.EncodeToString(hash[:])
-			doc.Terms = terms(string(c.Data))
+			doc.Terms = terms(c.Text)
 		}
 		docs[c.Key] = doc
 	}
