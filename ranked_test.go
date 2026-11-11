@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,36 @@ func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 	newer, _ := mirror.Snapshot(ctx)
 	if _, err := newer.FindRanked(ctx, q, RankedOptions{After: first.Next}, decode); !errors.Is(err, ErrSnapshotChanged) {
 		t.Fatalf("generation: %v", err)
+	}
+}
+
+func TestRankedCursorAcceptsLongKeys(t *testing.T) {
+	ctx := context.Background()
+	store := &MemoryStore{}
+	idx, _ := Open(store, "index/")
+	m, _ := NewSnapshotMirror(idx, store, "copies/")
+	long := strings.Repeat("a", 5000)
+	f := RankedFields{Text: "needle"}
+	data, _ := json.Marshal(f)
+	if err := m.ApplyDocuments(ctx, []SnapshotChange{{Key: long, Data: data, Text: f.SearchText()}, {Key: "z", Data: data, Text: f.SearchText()}}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decode := func(_ string, data []byte) (RankedFields, bool, error) {
+		var fields RankedFields
+		err := json.Unmarshal(data, &fields)
+		return fields, true, err
+	}
+	q := Query{All: [][]string{{"needle"}}}
+	first, err := s.FindRanked(ctx, q, RankedOptions{Limit: 1}, decode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.FindRanked(ctx, q, RankedOptions{Limit: 1, After: first.Next}, decode)
+	if err != nil || len(second.Documents) != 1 || second.Documents[0].Key != "z" {
+		t.Fatalf("next page: %+v %v", second, err)
 	}
 }
