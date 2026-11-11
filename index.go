@@ -465,7 +465,7 @@ func (r *segmentReader) hasDocument(ctx context.Context, key string) (bool, erro
 
 // Search returns candidate document keys. It may include false positives;
 // callers should read and verify source documents when exact matches matter.
-// The query must be nonempty UTF-8 of at most 256 bytes, the same word limit
+// The query must be nonempty UTF-8 of at most 512 bytes, the same word limit
 // as SearchQuery; matching uses NFKC, lowercase and character grams.
 func (i *Index) Search(ctx context.Context, query string) ([]string, error) {
 	if query == "" || len(query) > maxQueryWordBytes || !utf8.ValidString(query) {
