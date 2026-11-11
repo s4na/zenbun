@@ -13,6 +13,7 @@ import (
 )
 
 var ErrSnapshotChanged = errors.New("zenbun: search snapshot changed")
+var ErrInvalidRankedCursor = errors.New("zenbun: invalid ranked cursor")
 
 // RankedFields describes the searchable fields extracted from a payload.
 // Text should contain the body, excluding title and tags.
@@ -83,7 +84,7 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 	if options.After != "" {
 		raw, err := base64.RawURLEncoding.DecodeString(options.After)
 		if err != nil || json.Unmarshal(raw, &cursor) != nil || cursor.Key == "" {
-			return RankedResult{}, errors.New("zenbun: invalid ranked cursor")
+			return RankedResult{}, ErrInvalidRankedCursor
 		}
 		if cursor.Generation != s.Generation() || cursor.Query != fingerprint {
 			return RankedResult{}, ErrSnapshotChanged

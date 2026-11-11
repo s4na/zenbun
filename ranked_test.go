@@ -33,6 +33,9 @@ func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 		return f, true, err
 	}
 	q := Query{All: [][]string{{"needle"}}}
+	if _, err := snap.FindRanked(ctx, q, RankedOptions{After: "invalid!"}, decode); !errors.Is(err, ErrInvalidRankedCursor) {
+		t.Fatalf("invalid cursor: %v", err)
+	}
 	first, err := snap.FindRanked(ctx, q, RankedOptions{Limit: 2}, decode)
 	if err != nil {
 		t.Fatal(err)
