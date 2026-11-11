@@ -156,3 +156,61 @@ func TestRankedSearchOrdersMatchingAlternativesAndAppliesFilters(t *testing.T) {
 		t.Fatalf("order/filters: %v; next=%q", got, second.Next)
 	}
 }
+
+func TestExactRankedTitleAlternatives(t *testing.T) {
+	q := Query{All: [][]string{{"cat", "feline"}, {"toy", "plaything"}}}
+	for _, tc := range []struct {
+		title string
+		want  bool
+	}{
+		{"cat toy", true}, {"feline plaything", true},
+		{"cat feline toy plaything", true}, {"cat guide toy", false},
+		{"cat", false},
+	} {
+		if got := exactRankedTitle(tc.title, q); got != tc.want {
+			t.Errorf("title %q: got %v, want %v", tc.title, got, tc.want)
+		}
+	}
+}
+
+func TestRankedSearchExactAlternativePrecedesTaggedTitle(t *testing.T) {
+	ctx := t.Context()
+	store := &MemoryStore{}
+	index, err := Open(store, "index/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror, err := NewSnapshotMirror(index, store, "copies/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changes []SnapshotChange
+	for key, fields := range map[string]RankedFields{
+		"a": {Title: "cat guide", Tags: []string{"cat"}},
+		"z": {Title: "cat"},
+	} {
+		data, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changes = append(changes, SnapshotChange{Key: key, Text: fields.SearchText(), Data: data})
+	}
+	if err := mirror.ApplyDocuments(ctx, changes); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := mirror.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := snapshot.FindRanked(ctx, Query{All: [][]string{{"cat", "feline"}}}, RankedOptions{}, func(_ string, data []byte) (RankedFields, bool, error) {
+		var fields RankedFields
+		err := json.Unmarshal(data, &fields)
+		return fields, true, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Documents) != 2 || result.Documents[0].Key != "z" {
+		t.Fatalf("unexpected order: %+v", result.Documents)
+	}
+}
