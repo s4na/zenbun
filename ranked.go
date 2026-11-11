@@ -78,7 +78,7 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 	cursor := rankedCursor{}
 	if options.After != "" {
 		raw, err := base64.RawURLEncoding.DecodeString(options.After)
-		if err != nil || len(raw) > 4096 || json.Unmarshal(raw, &cursor) != nil || cursor.Key == "" {
+		if err != nil || json.Unmarshal(raw, &cursor) != nil || cursor.Key == "" {
 			return RankedResult{}, errors.New("zenbun: invalid ranked cursor")
 		}
 		if cursor.Generation != s.Generation() || cursor.Query != fingerprint {
