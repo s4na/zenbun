@@ -64,7 +64,7 @@ func TestQueryValidation(t *testing.T) {
 		{All: [][]string{{}}},
 		{All: [][]string{{""}}},
 		{All: [][]string{{"猫"}}, None: []string{""}},
-		{All: [][]string{{strings.Repeat("猫", 100)}}},
+		{All: [][]string{{strings.Repeat("猫", 171)}}},
 		{All: [][]string{{"猫\nネコ"}}},
 		{All: make([][]string, maxQueryGroups+1)},
 	}
@@ -74,7 +74,7 @@ func TestQueryValidation(t *testing.T) {
 		}
 	}
 	// Search shares the word length limit with structured queries.
-	if _, err := index.Search(context.Background(), strings.Repeat("猫", 100)); err == nil {
+	if _, err := index.Search(context.Background(), strings.Repeat("猫", 171)); err == nil {
 		t.Fatal("accepted a search longer than the word limit")
 	}
 	if _, err := index.Search(context.Background(), strings.Repeat("a", maxQueryWordBytes)); err != nil {
