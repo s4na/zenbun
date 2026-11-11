@@ -96,24 +96,32 @@ func (i *Index) loadManifest(ctx context.Context) (manifest, string, error) {
 	if err != nil {
 		return manifest{}, "", err
 	}
-	var m manifest
-	if len(obj.Data) > maxMetadataSize || json.Unmarshal(obj.Data, &m) != nil {
-		return manifest{}, "", errors.New("zenbun: invalid manifest")
-	}
-	if m.Version != manifestVersion {
-		return manifest{}, "", errors.New("zenbun: unsupported manifest version")
-	}
-	seen := make(map[string]bool)
-	for _, ref := range m.Segments {
-		if !strings.HasPrefix(ref.Key, i.prefix+"segments/") || strings.Contains(strings.TrimPrefix(ref.Key, i.prefix+"segments/"), "/") || ref.Size < footerSize || ref.Documents < 1 || seen[ref.Key] {
-			return manifest{}, "", errors.New("zenbun: invalid segment reference")
-		}
-		seen[ref.Key] = true
+	m, err := i.decodeManifest(obj.Data)
+	if err != nil {
+		return manifest{}, "", err
 	}
 	if obj.ETag == "" {
 		return manifest{}, "", errors.New("zenbun: manifest has no ETag")
 	}
 	return m, obj.ETag, nil
+}
+
+func (i *Index) decodeManifest(data []byte) (manifest, error) {
+	var m manifest
+	if len(data) > maxMetadataSize || json.Unmarshal(data, &m) != nil {
+		return manifest{}, errors.New("zenbun: invalid manifest")
+	}
+	if m.Version != manifestVersion {
+		return manifest{}, errors.New("zenbun: unsupported manifest version")
+	}
+	seen := make(map[string]bool)
+	for _, ref := range m.Segments {
+		if !strings.HasPrefix(ref.Key, i.prefix+"segments/") || strings.Contains(strings.TrimPrefix(ref.Key, i.prefix+"segments/"), "/") || ref.Size < footerSize || ref.Documents < 1 || seen[ref.Key] {
+			return manifest{}, errors.New("zenbun: invalid segment reference")
+		}
+		seen[ref.Key] = true
+	}
+	return m, nil
 }
 
 func (i *Index) publish(ctx context.Context, m manifest, etag string) error {
@@ -734,6 +742,17 @@ func (i *Index) Compact(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	changed, err := i.compactManifest(ctx, &m)
+	if err != nil || !changed {
+		return changed, err
+	}
+	if err := i.publish(ctx, m, etag); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (i *Index) compactManifest(ctx context.Context, m *manifest) (bool, error) {
 	at := -1
 	for n := 0; n+1 < len(m.Segments); n++ {
 		a, b := m.Segments[n].Size, m.Segments[n+1].Size
@@ -791,9 +810,6 @@ func (i *Index) Compact(ctx context.Context) (bool, error) {
 	}
 	segments = append(segments, m.Segments[at+2:]...)
 	m.Segments = segments
-	if err := i.publish(ctx, m, etag); err != nil {
-		return false, err
-	}
 	return true, nil
 }
 

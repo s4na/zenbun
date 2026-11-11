@@ -55,13 +55,30 @@ func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotC
 	if len(changes) == 0 {
 		return nil
 	}
+	docs, err := snapshotDocuments(changes)
+	if err != nil {
+		return err
+	}
+	state, etag, err := m.index.loadManifest(ctx)
+	if err != nil {
+		return err
+	}
+	ref, err := m.writeDocuments(ctx, changes, docs)
+	if err != nil {
+		return err
+	}
+	state.Segments = append(state.Segments, ref)
+	return m.index.publish(ctx, state, etag)
+}
+
+func snapshotDocuments(changes []SnapshotChange) (map[string]indexedDocument, error) {
 	docs := make(map[string]indexedDocument, len(changes))
 	for _, c := range changes {
 		if !validMirrorKey(c.Key) || (!c.Delete && !utf8.ValidString(c.Text)) {
-			return errors.New("zenbun: invalid document key or UTF-8 content")
+			return nil, errors.New("zenbun: invalid document key or UTF-8 content")
 		}
 		if _, ok := docs[c.Key]; ok {
-			return errors.New("zenbun: duplicate key in batch")
+			return nil, errors.New("zenbun: duplicate key in batch")
 		}
 		doc := indexedDocument{Deleted: c.Delete}
 		if !c.Delete {
@@ -71,10 +88,10 @@ func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotC
 		}
 		docs[c.Key] = doc
 	}
-	state, etag, err := m.index.loadManifest(ctx)
-	if err != nil {
-		return err
-	}
+	return docs, nil
+}
+
+func (m *SnapshotMirror) writeDocuments(ctx context.Context, changes []SnapshotChange, docs map[string]indexedDocument) (segmentRef, error) {
 	for _, c := range changes {
 		if c.Delete {
 			continue
@@ -84,22 +101,17 @@ func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotC
 		if errors.Is(err, ErrConflict) {
 			obj, readErr := m.store.Get(ctx, m.prefix+hash, nil)
 			if readErr != nil {
-				return readErr
+				return segmentRef{}, readErr
 			}
 			sum := sha256.Sum256(obj.Data)
 			if hex.EncodeToString(sum[:]) != hash {
-				return errors.New("zenbun: invalid immutable document copy")
+				return segmentRef{}, errors.New("zenbun: invalid immutable document copy")
 			}
 		} else if err != nil {
-			return fmt.Errorf("zenbun: save document copy: %w", err)
+			return segmentRef{}, fmt.Errorf("zenbun: save document copy: %w", err)
 		}
 	}
-	ref, err := m.index.writeSegment(ctx, docs)
-	if err != nil {
-		return err
-	}
-	state.Segments = append(state.Segments, ref)
-	return m.index.publish(ctx, state, etag)
+	return m.index.writeSegment(ctx, docs)
 }
 
 // Snapshot holds a consistent index generation. Keep its backing segments and
