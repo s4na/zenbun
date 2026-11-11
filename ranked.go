@@ -14,6 +14,7 @@ import (
 
 var ErrSnapshotChanged = errors.New("zenbun: search snapshot changed")
 var ErrInvalidRankedCursor = errors.New("zenbun: invalid ranked cursor")
+var ErrRankedLimit = errors.New("zenbun: ranked search work limit exceeded")
 
 // RankedFields describes the searchable fields extracted from a payload.
 // Text should contain the body, excluding title and tags.
@@ -37,10 +38,12 @@ type RankedResult struct {
 	Next      string
 }
 type RankedOptions struct {
-	Limit       int
-	After       string
-	Scope       string
-	Concurrency int
+	Limit         int
+	After         string
+	Scope         string
+	Concurrency   int
+	MaxCandidates int
+	MaxBytes      int64
 }
 type rankedCursor struct {
 	Generation string `json:"g"`
@@ -59,7 +62,7 @@ type rankedHit struct {
 // scope or index generation invalidates the cursor. Every page reads all
 // candidate payloads, so common queries can be expensive.
 func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOptions, decode func(string, []byte) (RankedFields, bool, error)) (RankedResult, error) {
-	if decode == nil || options.Limit < 0 || options.Limit > 1000 || options.Concurrency < 0 || options.Concurrency > maxFindReads {
+	if decode == nil || options.Limit < 0 || options.Limit > 1000 || options.Concurrency < 0 || options.Concurrency > maxFindReads || options.MaxCandidates < 0 || options.MaxBytes < 0 {
 		return RankedResult{}, errors.New("zenbun: invalid ranked search options")
 	}
 	if options.Limit == 0 {
@@ -94,16 +97,24 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 	if err != nil {
 		return RankedResult{}, err
 	}
+	if options.MaxCandidates > 0 && len(keys) > options.MaxCandidates {
+		return RankedResult{}, ErrRankedLimit
+	}
 	hits := make([]rankedHit, 0, len(keys))
 	bodies := readAhead(ctx, keys, options.Concurrency, func(ctx context.Context, key string) ([]byte, bool, error) {
 		data, err := s.Get(ctx, key)
 		return data, true, err
 	})
 	defer bodies.stop()
+	var bytesRead int64
 	for _, key := range keys {
 		body := bodies.next()
 		if body.err != nil {
 			return RankedResult{}, body.err
+		}
+		bytesRead += int64(len(body.data))
+		if options.MaxBytes > 0 && bytesRead > options.MaxBytes {
+			return RankedResult{}, ErrRankedLimit
 		}
 		fields, include, err := decode(key, body.data)
 		if err != nil {
@@ -180,6 +191,10 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		data, err := s.Get(ctx, h.Key)
 		if err != nil {
 			return RankedResult{}, err
+		}
+		bytesRead += int64(len(data))
+		if options.MaxBytes > 0 && bytesRead > options.MaxBytes {
+			return RankedResult{}, ErrRankedLimit
 		}
 		result.Documents = append(result.Documents, RankedDocument{Key: h.Key, Data: data})
 	}

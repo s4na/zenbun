@@ -33,6 +33,12 @@ func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 		return f, true, err
 	}
 	q := Query{All: [][]string{{"needle"}}}
+	if _, err := snap.FindRanked(ctx, q, RankedOptions{MaxCandidates: 3}, decode); !errors.Is(err, ErrRankedLimit) {
+		t.Fatalf("candidate limit: %v", err)
+	}
+	if _, err := snap.FindRanked(ctx, q, RankedOptions{MaxBytes: 1}, decode); !errors.Is(err, ErrRankedLimit) {
+		t.Fatalf("byte limit: %v", err)
+	}
 	if _, err := snap.FindRanked(ctx, q, RankedOptions{After: "invalid!"}, decode); !errors.Is(err, ErrInvalidRankedCursor) {
 		t.Fatalf("invalid cursor: %v", err)
 	}
