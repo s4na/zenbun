@@ -99,3 +99,60 @@ func TestRankedCursorAcceptsLongKeys(t *testing.T) {
 		t.Fatalf("next page: %+v %v", second, err)
 	}
 }
+
+func TestRankedSearchOrdersMatchingAlternativesAndAppliesFilters(t *testing.T) {
+	ctx := t.Context()
+	store := &MemoryStore{}
+	index, err := Open(store, "index/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror, err := NewSnapshotMirror(index, store, "copies/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]RankedFields{
+		"a": {Title: "other", Text: "alpha"},
+		"b": {Title: "other", Text: "alpha beta"},
+		"c": {Title: "other", Text: "alpha beta"},
+		"d": {Title: "other", Text: "alpha beta forbidden"},
+		"e": {Title: "other", Tags: []string{"alpha beta"}},
+		"f": {Title: "alpha beta"},
+	}
+	var changes []SnapshotChange
+	for key, f := range fields {
+		data, err := json.Marshal(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changes = append(changes, SnapshotChange{Key: key, Text: f.SearchText(), Data: data})
+	}
+	if err := mirror.ApplyDocuments(ctx, changes); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := mirror.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decode := func(key string, data []byte) (RankedFields, bool, error) {
+		var f RankedFields
+		err := json.Unmarshal(data, &f)
+		return f, key != "c", err
+	}
+	query := Query{All: [][]string{{"alpha", "beta"}}, None: []string{"forbidden"}}
+	first, err := snapshot.FindRanked(ctx, query, RankedOptions{Limit: 2}, decode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := snapshot.FindRanked(ctx, query, RankedOptions{Limit: 2, After: first.Next}, decode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, item := range append(first.Documents, second.Documents...) {
+		got = append(got, item.Key)
+	}
+	if !reflect.DeepEqual(got, []string{"f", "e", "b", "a"}) || second.Next != "" {
+		t.Fatalf("order/filters: %v; next=%q", got, second.Next)
+	}
+}

@@ -12,8 +12,13 @@ import (
 	"strings"
 )
 
+// ErrSnapshotChanged means a cursor belongs to another generation or query.
 var ErrSnapshotChanged = errors.New("zenbun: search snapshot changed")
+
+// ErrInvalidRankedCursor means a ranked cursor cannot be decoded.
 var ErrInvalidRankedCursor = errors.New("zenbun: invalid ranked cursor")
+
+// ErrRankedLimit means a ranked search exceeded its configured work limit.
 var ErrRankedLimit = errors.New("zenbun: ranked search work limit exceeded")
 
 // RankedFields describes the searchable fields extracted from a payload.
@@ -29,14 +34,20 @@ func (f RankedFields) SearchText() string {
 	return f.Title + "\n" + strings.Join(f.Tags, "\n") + "\n" + f.Text
 }
 
+// RankedDocument is a verified matching key and its immutable payload.
 type RankedDocument struct {
 	Key  string
 	Data []byte
 }
+
+// RankedResult contains one page and, when applicable, a continuation cursor.
 type RankedResult struct {
 	Documents []RankedDocument
 	Next      string
 }
+
+// RankedOptions bounds the result and work for a ranked search. Zero limits
+// select defaults for Limit and Concurrency, and no work limit otherwise.
 type RankedOptions struct {
 	Limit         int
 	After         string
@@ -52,11 +63,11 @@ type rankedCursor struct {
 }
 type rankedHit struct {
 	RankedDocument
-	priority, tag, groups int
+	priority, tag, words int
 }
 
 // FindRanked verifies all candidates and orders matches by exact title,
-// matching title, matching tags, number of matching groups, then key. Decode
+// matching title, matching tags, number of distinct matching words, then key. Decode
 // extracts fields from the immutable payload and may exclude a document.
 // Scope must distinguish application filters used by Decode. Changing a query,
 // scope or index generation invalidates the cursor. Every page reads all
@@ -132,11 +143,7 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		}
 		words := make([]string, 0, len(q.All))
 		for _, group := range q.All {
-			if len(group) != 1 {
-				words = nil
-				break
-			}
-			words = append(words, group[0])
+			words = append(words, group...)
 		}
 		if len(words) > 0 && normalize(fields.Title) == normalize(strings.Join(words, " ")) {
 			hit.priority = 3
@@ -148,11 +155,13 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 			}
 		}
 		text := normalize(fields.SearchText())
+		seen := make(map[string]bool)
 		for _, group := range q.All {
 			for _, word := range group {
-				if strings.Contains(text, normalize(word)) {
-					hit.groups++
-					break
+				word = normalize(word)
+				if !seen[word] && strings.Contains(text, word) {
+					hit.words++
+					seen[word] = true
 				}
 			}
 		}
@@ -166,8 +175,8 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		if a.tag != b.tag {
 			return a.tag > b.tag
 		}
-		if a.groups != b.groups {
-			return a.groups > b.groups
+		if a.words != b.words {
+			return a.words > b.words
 		}
 		return a.Key < b.Key
 	})

@@ -21,6 +21,8 @@ type SnapshotMirror struct {
 	prefix string
 }
 
+// NewSnapshotMirror associates a dedicated index with immutable copies under
+// a separate, non-overlapping prefix.
 func NewSnapshotMirror(index *Index, store Store, prefix string) (*SnapshotMirror, error) {
 	m, err := NewMirror(index, store, prefix)
 	if err != nil {
@@ -111,6 +113,8 @@ type Snapshot struct {
 	manifest manifest
 }
 
+// Snapshot captures the currently published generation. A snapshot of an
+// empty index has an empty generation and no documents.
 func (m *SnapshotMirror) Snapshot(ctx context.Context) (*Snapshot, error) {
 	state, _, err := m.index.loadManifest(ctx)
 	if err != nil {
