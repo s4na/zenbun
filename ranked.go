@@ -55,6 +55,9 @@ type RankedOptions struct {
 	Concurrency   int
 	MaxCandidates int
 	MaxBytes      int64
+	// ExactTitle optionally adds an explicit title phrase to the exact-match tier.
+	// It must also satisfy the query. It is bound to the pagination cursor.
+	ExactTitle string
 }
 type rankedCursor struct {
 	Generation string `json:"g"`
@@ -86,9 +89,10 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		return RankedResult{}, err
 	}
 	queryBytes, err := json.Marshal(struct {
-		Query Query
-		Scope string
-	}{q, options.Scope})
+		Query      Query
+		Scope      string
+		ExactTitle string
+	}{q, options.Scope, normalize(options.ExactTitle)})
 	if err != nil {
 		return RankedResult{}, err
 	}
@@ -141,7 +145,7 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		if rankMatches(fields.Title, q) {
 			hit.priority = 2
 		}
-		if exactRankedTitle(fields.Title, q) {
+		if exactRankedTitle(fields.Title, q) || (options.ExactTitle != "" && normalize(fields.Title) == normalize(options.ExactTitle) && rankMatches(fields.Title, q)) {
 			hit.priority = 3
 		}
 		if rankMatches(strings.Join(fields.Tags, "\n"), q) {
@@ -213,17 +217,14 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 	return result, nil
 }
 
-// exactRankedTitle accepts one alternative from each group, as well as the
-// complete query phrase (including alternatives) in their original order.
+// exactRankedTitle accepts one alternative from each group in order.
 func exactRankedTitle(title string, q Query) bool {
 	title = normalize(title)
-	var words []string
 	positions := map[int]bool{0: true}
 	for i, group := range q.All {
 		next := make(map[int]bool)
 		for _, word := range group {
 			word = normalize(word)
-			words = append(words, word)
 			for pos := range positions {
 				prefix := word
 				if i > 0 {
@@ -236,7 +237,7 @@ func exactRankedTitle(title string, q Query) bool {
 		}
 		positions = next
 	}
-	return len(q.All) > 0 && (positions[len(title)] || title == strings.Join(words, " "))
+	return len(q.All) > 0 && positions[len(title)]
 }
 func rankMatches(text string, q Query) bool {
 	text = normalize(text)

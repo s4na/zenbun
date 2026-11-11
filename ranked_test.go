@@ -140,11 +140,14 @@ func TestRankedSearchOrdersMatchingAlternativesAndAppliesFilters(t *testing.T) {
 		return f, key != "c", err
 	}
 	query := Query{All: [][]string{{"alpha", "beta"}}, None: []string{"forbidden"}}
-	first, err := snapshot.FindRanked(ctx, query, RankedOptions{Limit: 2}, decode)
+	first, err := snapshot.FindRanked(ctx, query, RankedOptions{Limit: 2, ExactTitle: "alpha beta"}, decode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := snapshot.FindRanked(ctx, query, RankedOptions{Limit: 2, After: first.Next}, decode)
+	if _, err := snapshot.FindRanked(ctx, query, RankedOptions{Limit: 2, After: first.Next}, decode); !errors.Is(err, ErrSnapshotChanged) {
+		t.Fatalf("changed exact title: %v", err)
+	}
+	second, err := snapshot.FindRanked(ctx, query, RankedOptions{Limit: 2, After: first.Next, ExactTitle: "alpha beta"}, decode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +167,7 @@ func TestExactRankedTitleAlternatives(t *testing.T) {
 		want  bool
 	}{
 		{"cat toy", true}, {"feline plaything", true},
-		{"cat feline toy plaything", true}, {"cat guide toy", false},
+		{"cat feline toy plaything", false}, {"cat guide toy", false},
 		{"cat", false},
 	} {
 		if got := exactRankedTitle(tc.title, q); got != tc.want {
