@@ -477,12 +477,17 @@ func (i *Index) SearchQuery(ctx context.Context, q Query) ([]string, error) {
 }
 
 func (i *Index) searchQuery(ctx context.Context, q Query) ([]string, error) {
-	groups := q.indexGroups()
 	m, _, err := i.loadManifest(ctx)
 	if err != nil {
 		return nil, err
 	}
+	return i.searchManifest(ctx, m, q)
+}
+
+func (i *Index) searchManifest(ctx context.Context, m manifest, q Query) ([]string, error) {
+	groups := q.indexGroups()
 	readers := make([]*segmentReader, len(m.Segments))
+	var err error
 	for n, ref := range m.Segments {
 		readers[n], err = i.segment(ctx, ref)
 		if err != nil {

@@ -587,3 +587,24 @@ Dependabot は、Go モジュール・GitHub Actions・CI のストレージイ�
 ## ライセンス
 
 [MIT License](LICENSE)（Copyright (c) 2026 s4na）
+
+## 世代を固定した文書コピー
+
+`SnapshotMirror` は不変の本文コピーと、そのコピーを参照する索引を保存します。変更バッチの公開は索引の条件付き更新で行い、失敗時には以前の世代を維持します。索引は専用にし、`Index.Apply`、`Sync`、`Mirror` と混用しないでください。
+
+```go
+mirror, err := zenbun.NewSnapshotMirror(index, store, "copies/articles/")
+if err != nil { log.Fatal(err) }
+if err := mirror.Apply(ctx, []zenbun.Change{{Key: "article-1", Data: []byte("本文")}}); err != nil { log.Fatal(err) }
+snapshot, err := mirror.Snapshot(ctx)
+if err != nil { log.Fatal(err) }
+keys, err := snapshot.SearchQuery(ctx, zenbun.Query{All: [][]string{{"本文"}}})
+if err != nil { log.Fatal(err) }
+for _, key := range keys {
+    body, err := snapshot.Get(ctx, key)
+    if err != nil { log.Fatal(err) }
+    _ = body // 候補には誤検出があるため、本文を確認する。
+}
+```
+
+`snapshot.Generation()` は更新やコンパクションで変わります。`Snapshot` は取得時の索引と本文を読みます。古いコピーは自動削除されず、失敗した書き込みも未参照のコピーやセグメントを残すことがあります。`Index.Reclaim` で古いセグメントを回収すると、保持中の古い `Snapshot` は使えなくなるため、呼び出し側で読み取りの終了を調整してください。複数の書き手は競合時に変更を再試行し、アプリ側で変更の順序を管理してください。
