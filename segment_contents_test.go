@@ -110,3 +110,33 @@ func TestMergePostingBlocksPreservesRecordsAndTerms(t *testing.T) {
 		}
 	}
 }
+
+func TestCompactCrossWindowReadReusesBothRanges(t *testing.T) {
+	ctx := t.Context()
+	key := "index/segments/one"
+	data := make([]byte, compactWindowSize+16)
+	copy(data[compactWindowSize-2:], "abcdefgh")
+	memory := &MemoryStore{}
+	if _, err := memory.Put(ctx, key, data, PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	meter := &countingSegmentStore{Store: memory}
+	store := compactStore{Store: meter, ref: segmentRef{Key: key, Size: int64(len(data))}}
+	for _, tc := range []struct {
+		start, end int64
+		want       string
+	}{
+		{compactWindowSize - 2, compactWindowSize, "ab"},
+		{compactWindowSize - 1, compactWindowSize + 3, "bcde"},
+		{compactWindowSize + 2, compactWindowSize + 6, "efgh"},
+		{compactWindowSize - 2, compactWindowSize + 1, "abc"},
+	} {
+		obj, err := store.Get(ctx, key, &ByteRange{Start: tc.start, End: tc.end})
+		if err != nil || string(obj.Data) != tc.want {
+			t.Fatalf("range [%d,%d): %q, %v", tc.start, tc.end, obj.Data, err)
+		}
+	}
+	if meter.segmentGets != 2 || meter.segmentBytes != int64(len(data)) {
+		t.Fatalf("GETs %d, bytes %d", meter.segmentGets, meter.segmentBytes)
+	}
+}

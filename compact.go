@@ -21,33 +21,55 @@ type compactWindow struct {
 	data  []byte
 }
 
+const compactWindowSize = 8 << 20
+
 func (s *compactStore) Get(ctx context.Context, key string, r *ByteRange) (Object, error) {
-	const window = 8 << 20
 	if key != s.ref.Key || r == nil || !validExtent(r.Start, r.End-r.Start, s.ref.Size) {
 		return Object{}, ErrInvalidRange
 	}
 	if err := ctx.Err(); err != nil {
 		return Object{}, err
 	}
-	// The dictionary for a group of values follows them on disk. Retain
-	// the preceding window when reading ahead crosses its boundary.
-	for _, cached := range s.windows {
-		if validExtent(r.Start-cached.start, r.End-r.Start, int64(len(cached.data))) {
-			return Object{Data: cached.data[r.Start-cached.start : r.End-cached.start]}, nil
-		}
-	}
-	if r.End-r.Start > window {
+	if r.End-r.Start > compactWindowSize {
 		return s.Store.Get(ctx, key, r)
 	}
-	start := r.Start - r.Start%window
-	size := max(min(int64(window), s.ref.Size-start), r.End-start)
-	data, err := readRange(ctx, s.Store, key, start, size)
+
+	first, err := s.window(ctx, r.Start)
 	if err != nil {
 		return Object{}, err
 	}
-	s.windows[s.next] = compactWindow{start: start, data: data}
+	offset := r.Start - first.start
+	if r.End-first.start <= int64(len(first.data)) {
+		return Object{Data: first.data[offset : r.End-first.start]}, nil
+	}
+	// A posting or dictionary can straddle two windows. Fetch only the
+	// missing window and join the two pieces of this entry.
+	second, err := s.window(ctx, r.End-1)
+	if err != nil {
+		return Object{}, err
+	}
+	data := make([]byte, r.End-r.Start)
+	n := copy(data, first.data[offset:])
+	copy(data[n:], second.data[:r.End-second.start])
+	return Object{Data: data}, nil
+}
+
+func (s *compactStore) window(ctx context.Context, pos int64) (compactWindow, error) {
+	start := pos - pos%compactWindowSize
+	for _, cached := range s.windows {
+		if cached.start == start && cached.data != nil {
+			return cached, nil
+		}
+	}
+	size := min(int64(compactWindowSize), s.ref.Size-start)
+	data, err := readRange(ctx, s.Store, s.ref.Key, start, size)
+	if err != nil {
+		return compactWindow{}, err
+	}
+	w := compactWindow{start: start, data: data}
+	s.windows[s.next] = w
 	s.next = (s.next + 1) % len(s.windows)
-	return Object{Data: data[r.Start-start : r.End-start]}, nil
+	return w, nil
 }
 
 // compactInput walks an immutable segment's posting entries in term order.
