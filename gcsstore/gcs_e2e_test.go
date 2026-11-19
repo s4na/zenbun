@@ -24,7 +24,7 @@ func TestGCSEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := strings.TrimRight(endpoint, "/") + "/storage/v1/b?project=test"
-	status, _, _, err := store.request(ctx, http.MethodPost, target, http.Header{"Content-Type": {"application/json"}}, []byte(`{"name":"zenbun-test"}`), false)
+	status, _, _, err := store.request(ctx, http.MethodPost, target, http.Header{"Content-Type": {"application/json"}}, []byte(`{"name":"zenbun-test"}`), false, nil)
 	if err != nil || (status != http.StatusOK && status != http.StatusConflict) {
 		t.Fatalf("create bucket: %d %v", status, err)
 	}
