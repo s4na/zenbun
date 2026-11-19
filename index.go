@@ -249,8 +249,19 @@ func (r *segmentReader) decodeDocumentBlock(block int, data []byte) ([]documentR
 	if err := json.Unmarshal(data, &records); err != nil || len(records) != expected || block >= len(r.docFirst) || records[0].Key != r.docFirst[block] {
 		return nil, invalid
 	}
-	for n, record := range records {
-		if !utf8.ValidString(record.Key) || !utf8.ValidString(record.ETag) || n > 0 && records[n-1].Key >= record.Key {
+	for n := range records {
+		record := &records[n]
+		if len(record.ETagBytes) > 0 {
+			if record.ETag != "" {
+				return nil, invalid
+			}
+			record.ETag = string(record.ETagBytes)
+			record.ETagBytes = nil
+		} else if strings.ContainsRune(record.ETag, utf8.RuneError) {
+			// Force Sync to refresh a possibly lossy legacy version.
+			record.ETag = ""
+		}
+		if !utf8.ValidString(record.Key) || n > 0 && records[n-1].Key >= record.Key {
 			return nil, invalid
 		}
 	}

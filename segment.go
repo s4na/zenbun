@@ -52,9 +52,10 @@ type blockIndex struct {
 // documentRecord is one row of the v3 document table. Its position in key
 // order, starting at 1, is the document ID used by postings.
 type documentRecord struct {
-	Key     string `json:"key"`
-	Deleted bool   `json:"deleted,omitempty"`
-	ETag    string `json:"etag,omitempty"`
+	Key       string `json:"key"`
+	Deleted   bool   `json:"deleted,omitempty"`
+	ETag      string `json:"etag,omitempty"`
+	ETagBytes []byte `json:"etag_bytes,omitempty"`
 }
 
 type segmentIndex struct {
@@ -239,6 +240,11 @@ func (s *segmentWriter) addDocument(record documentRecord) error {
 	s.written++
 	s.lastKey = record.Key
 	bloomAdd(s.bloom, record.Key)
+	// Legacy JSON strings containing U+FFFD may already have lost bytes.
+	if strings.ContainsRune(record.ETag, utf8.RuneError) {
+		record.ETagBytes = []byte(record.ETag)
+		record.ETag = ""
+	}
 	s.docBlock = append(s.docBlock, record)
 	if len(s.docBlock) == documentBlockSize {
 		s.flushDocuments()
