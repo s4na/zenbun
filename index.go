@@ -77,6 +77,7 @@ type segmentRef struct {
 type manifest struct {
 	Version    int          `json:"version"`
 	Generation string       `json:"generation"`
+	Barrier    string       `json:"reclaim_barrier,omitempty"`
 	Segments   []segmentRef `json:"segments"`
 }
 
@@ -134,8 +135,13 @@ func (i *Index) publishWithETag(ctx context.Context, m manifest, etag string) (s
 	if err != nil {
 		return "", err
 	}
-	m.Version = manifestVersion
 	m.Generation = id
+	m.Barrier = ""
+	return i.writeManifest(ctx, m, etag)
+}
+
+func (i *Index) writeManifest(ctx context.Context, m manifest, etag string) (string, error) {
+	m.Version = manifestVersion
 	data, err := json.Marshal(m)
 	if err != nil {
 		return "", err
@@ -835,7 +841,13 @@ func (i *Index) Reclaim(ctx context.Context, grace time.Duration) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := i.publish(ctx, m, etag); err != nil {
+	// Rotate the CAS token even for content-hash stores, while retaining the
+	// searchable generation used by snapshots and pagination cursors.
+	m.Barrier, err = randomID()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := i.writeManifest(ctx, m, etag); err != nil {
 		return 0, err
 	}
 	markers, err := i.store.List(ctx, i.prefix+"retired/")
