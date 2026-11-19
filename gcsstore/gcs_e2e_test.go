@@ -29,4 +29,17 @@ func TestGCSEndToEnd(t *testing.T) {
 		t.Fatalf("create bucket: %d %v", status, err)
 	}
 	storetest.Run(t, store)
+	var cancelled bool
+	transport := http.DefaultTransport
+	client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := transport.RoundTrip(req)
+		if err == nil && req.Method == http.MethodDelete && req.URL.Query().Get("upload_id") != "" && req.URL.Query().Get("name") == "stream/abort" {
+			cancelled = resp.StatusCode == 499 || resp.StatusCode == 204 || resp.StatusCode == 200
+		}
+		return resp, err
+	})
+	storetest.RunStream(t, store, store)
+	if !cancelled {
+		t.Fatal("backend did not acknowledge cancellation of aborted upload")
+	}
 }

@@ -4,6 +4,7 @@ package zenbun
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 )
 
@@ -67,4 +68,13 @@ type Store interface {
 
 	// List returns the objects whose keys start with prefix, sorted by key.
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
+}
+
+// StreamCreator is an optional Store capability for creating immutable
+// objects. The callback writes the complete object and must be called once
+// on a successful create. A producer error must not publish partial data.
+// If the destination exists, CreateStream must preserve it and return an
+// error matching ErrConflict. The writer is valid only during the callback.
+type StreamCreator interface {
+	CreateStream(ctx context.Context, key string, produce func(io.Writer) error) error
 }

@@ -2,7 +2,9 @@ package s3store
 
 import (
 	"context"
+	"encoding/xml"
 	"net/http"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -26,4 +28,17 @@ func TestS3EndToEnd(t *testing.T) {
 		t.Fatalf("create bucket: %d %v", status, err)
 	}
 	storetest.Run(t, store)
+	storetest.RunStream(t, store, store)
+	// A GET cannot distinguish an aborted upload from leaked uncommitted
+	// parts. Inspect the backend's multipart listing as well.
+	status, _, body, err := store.request(ctx, http.MethodGet, "", url.Values{"uploads": {""}, "prefix": {"stream/"}}, nil, nil, true, nil)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("list unfinished uploads: %d %v", status, err)
+	}
+	var uploads struct {
+		Items []struct{ Key string } `xml:"Upload"`
+	}
+	if err := xml.Unmarshal(body, &uploads); err != nil || len(uploads.Items) != 0 {
+		t.Fatalf("unfinished uploads: %v, %v", uploads.Items, err)
+	}
 }

@@ -1,6 +1,7 @@
 package zenbun
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -138,5 +139,46 @@ func TestCompactCrossWindowReadReusesBothRanges(t *testing.T) {
 	}
 	if meter.segmentGets != 2 || meter.segmentBytes != int64(len(data)) {
 		t.Fatalf("GETs %d, bytes %d", meter.segmentGets, meter.segmentBytes)
+	}
+}
+
+// Existing oversized refs stay in the manifest. Smaller neighbours can still
+// be merged, including when the newer pair is tied with an older pair.
+func TestCompactSkipsOversizeAndPrefersNewerTie(t *testing.T) {
+	ctx := t.Context()
+	index, err := Open(&MemoryStore{}, "index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := manifest{Segments: []segmentRef{{Key: "legacy", Size: maxBufferedCompactBytes + 1, Documents: 1}}}
+	for _, key := range []string{"a", "b", "c"} {
+		ref, err := index.writeSegment(ctx, map[string]indexedDocument{key: {Terms: terms("cat")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Segments = append(m.Segments, ref)
+	}
+	legacy, first := m.Segments[0], m.Segments[1]
+	changed, err := index.compactManifest(ctx, &m)
+	if err != nil || !changed || len(m.Segments) != 3 || m.Segments[0] != legacy || m.Segments[1] != first || m.Segments[2].Documents != 2 {
+		t.Fatalf("remaining segments: %v, %v", m.Segments, err)
+	}
+}
+
+func TestCompactionDecodesDeltaAcrossRangeBoundary(t *testing.T) {
+	ctx := t.Context()
+	store := &MemoryStore{}
+	// The first byte of the final two-byte delta ends the initial 64 KiB read.
+	data := bytes.Repeat([]byte{1}, (64<<10)-1)
+	data = append(data, 0x80, 1)
+	count := (64 << 10) - 1 + 128
+	if _, err := store.Put(ctx, "posting", data, PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	in := compactInput{reader: &segmentReader{store: store, ref: segmentRef{Key: "posting", Documents: count}}, entry: dictionaryEntry{Length: int64(len(data))}, newIDs: make([]uint32, count+1)}
+	in.newIDs[count] = 1
+	ids, err := in.mappedPosting(ctx)
+	if err != nil || len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("remapped IDs: %v %v", ids, err)
 	}
 }

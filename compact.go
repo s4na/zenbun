@@ -1,8 +1,8 @@
 package zenbun
 
 import (
-	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"strings"
 )
@@ -21,7 +21,14 @@ type compactWindow struct {
 	data  []byte
 }
 
-const compactWindowSize = 8 << 20
+const (
+	compactWindowSize       = 1 << 20
+	maxCompactBytes         = 128 << 20
+	maxBufferedCompactBytes = 8 << 20
+	maxCompactDocuments     = 1 << 17
+)
+
+var errCompactSize = errors.New("zenbun: compaction exceeds segment size limit")
 
 func (s *compactStore) Get(ctx context.Context, key string, r *ByteRange) (Object, error) {
 	if key != s.ref.Key || r == nil || !validExtent(r.Start, r.End-r.Start, s.ref.Size) {
@@ -76,8 +83,7 @@ func (s *compactStore) window(ctx context.Context, pos int64) (compactWindow, er
 // newIDs maps each input document ID to its output ID, or zero if suppressed.
 type compactInput struct {
 	reader  *segmentReader
-	records []documentRecord
-	newIDs  []uint64
+	newIDs  []uint32
 	block   int
 	entries []dictionaryEntry
 	entry   dictionaryEntry
@@ -90,44 +96,67 @@ func (i *Index) compactInput(ctx context.Context, ref segmentRef) (*compactInput
 		return nil, err
 	}
 	reader.store = &compactStore{Store: i.store, ref: ref}
-	var records []documentRecord
-	for first := 0; first < len(reader.docFirst); first += documentBatchBlocks {
-		last := min(first+documentBatchBlocks, len(reader.docFirst)) - 1
-		blocks, err := reader.documentBlockBatch(ctx, first, last)
+	return &compactInput{reader: reader, newIDs: make([]uint32, ref.Documents+1)}, nil
+}
+
+// docCursor pins only the current document block. Each pass constructs new
+// cursors so a full output table is never retained between passes.
+type docCursor struct {
+	input   *compactInput
+	records []documentRecord
+	id      int
+}
+
+func (d *docCursor) peek(ctx context.Context) (*documentRecord, error) {
+	if d.id == d.input.reader.ref.Documents {
+		return nil, nil
+	}
+	if len(d.records) == 0 {
+		records, err := d.input.reader.documentBlock(ctx, d.id/documentBlockSize)
 		if err != nil {
 			return nil, err
 		}
-		for _, block := range blocks {
-			records = append(records, block...)
-		}
+		d.records = records
 	}
-	return &compactInput{reader: reader, records: records, newIDs: make([]uint64, len(records)+1)}, nil
+	return &d.records[0], nil
 }
 
-func mergeDocumentTables(old, newer *compactInput, oldest bool) []documentRecord {
-	var records []documentRecord
-	for a, b := 0, 0; a < len(old.records) || b < len(newer.records); {
-		input, pos := newer, b
-		if b == len(newer.records) || a < len(old.records) && old.records[a].Key < newer.records[b].Key {
-			input, pos = old, a
-			a++
-		} else {
-			if a < len(old.records) && old.records[a].Key == newer.records[b].Key {
-				a++
-			}
-			b++
+func (d *docCursor) pop() { d.id++; d.records = d.records[1:] }
+
+func mergeDocuments(ctx context.Context, old, newer *compactInput, oldest bool, w *segmentWriter) (int, error) {
+	a, b := docCursor{input: old}, docCursor{input: newer}
+	count := 0
+	for {
+		left, err := a.peek(ctx)
+		if err != nil {
+			return 0, err
 		}
-		record := input.records[pos]
+		right, err := b.peek(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if left == nil && right == nil {
+			return count, nil
+		}
+		cursor, record := &b, right
+		if right == nil || left != nil && left.Key < right.Key {
+			cursor, record = &a, left
+		} else if left != nil && left.Key == right.Key {
+			a.pop()
+		}
+		cursor.pop()
 		if oldest && record.Deleted {
 			continue
 		}
-		records = append(records, record)
-		if !record.Deleted {
-			input.newIDs[pos+1] = uint64(len(records))
+		count++
+		if w != nil {
+			if err := w.addDocument(*record); err != nil {
+				return 0, err
+			}
+		} else if !record.Deleted {
+			cursor.input.newIDs[cursor.id] = uint32(count)
 		}
 	}
-	old.records, newer.records = nil, nil
-	return records
 }
 
 func (in *compactInput) advance(ctx context.Context) error {
@@ -159,17 +188,32 @@ func (in *compactInput) advance(ctx context.Context) error {
 
 func (in *compactInput) mappedPosting(ctx context.Context) ([]uint64, error) {
 	entry := in.entry
-	data, err := readRange(ctx, in.reader.store, in.reader.ref.Key, entry.Offset, entry.Length)
-	if err != nil {
-		return nil, err
-	}
 	in.ids = in.ids[:0]
-	err = validatePosting(data, in.reader.ref.Documents, func(id uint64) {
-		if mapped := in.newIDs[id]; mapped != 0 {
-			in.ids = append(in.ids, mapped)
+	var id uint64
+	for offset, end := entry.Offset, entry.Offset+entry.Length; offset < end; {
+		length := min(int64(64<<10), end-offset)
+		data, err := readRange(ctx, in.reader.store, in.reader.ref.Key, offset, length)
+		if err != nil {
+			return nil, err
 		}
-	})
-	return in.ids, err
+		for len(data) > 0 {
+			delta, n := binary.Uvarint(data)
+			// Retry a split varint from its first byte in the next range.
+			if n == 0 && offset+int64(len(data)) < end {
+				break
+			}
+			if n <= 0 || delta == 0 || delta > uint64(in.reader.ref.Documents)-id {
+				return nil, errors.New("zenbun: invalid compact posting")
+			}
+			id += delta
+			if mapped := in.newIDs[id]; mapped != 0 {
+				in.ids = append(in.ids, uint64(mapped))
+			}
+			offset += int64(n)
+			data = data[n:]
+		}
+	}
+	return in.ids, nil
 }
 
 func mergePostingIDs(dst, a, b []uint64) []uint64 {
@@ -237,22 +281,21 @@ func (i *Index) mergeSegments(ctx context.Context, older, newer segmentRef, olde
 	if err != nil {
 		return segmentRef{}, err
 	}
-	records := mergeDocumentTables(a, b, oldest)
-	if len(records) == 0 {
-		return segmentRef{}, nil
+	count, err := mergeDocuments(ctx, a, b, oldest, nil)
+	if err != nil || count == 0 {
+		return segmentRef{}, err
 	}
-	var out bytes.Buffer
-	w := newSegmentWriter(&out, len(records))
-	for _, record := range records {
-		if err := w.addDocument(record); err != nil {
-			return segmentRef{}, err
+	return i.createSegment(ctx, count, i.compactLimit(), func(w *segmentWriter) error {
+		if _, err := mergeDocuments(ctx, a, b, oldest, w); err != nil {
+			return err
 		}
+		return mergePostings(ctx, w, a, b)
+	})
+}
+
+func (i *Index) compactLimit() int64 {
+	if _, ok := i.store.(StreamCreator); ok {
+		return maxCompactBytes
 	}
-	if err := mergePostings(ctx, w, a, b); err != nil {
-		return segmentRef{}, err
-	}
-	if err := w.finish(); err != nil {
-		return segmentRef{}, err
-	}
-	return i.storeSegment(ctx, out.Bytes(), len(records))
+	return maxBufferedCompactBytes
 }

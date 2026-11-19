@@ -24,6 +24,7 @@ type operation struct {
 	AllocBytes         uint64  `json:"alloc_bytes"`
 	Gets               int64   `json:"gets"`
 	ReceivedBytes      int64   `json:"received_bytes"`
+	WrittenBytes       int64   `json:"written_bytes"`
 	Puts               int64   `json:"puts"`
 }
 
@@ -38,6 +39,7 @@ func measureOperation(store *meter, fn func() error) (operation, error) {
 	runtime.GC()
 	base, allocStart := readHeap()
 	gets, received, puts := store.Gets.Load(), store.Received.Load(), store.Puts.Load()
+	written := store.Written.Load()
 	peak := base
 	var mu sync.Mutex
 	stop := make(chan struct{})
@@ -73,5 +75,6 @@ func measureOperation(store *meter, fn func() error) (operation, error) {
 		Gets:               store.Gets.Load() - gets,
 		ReceivedBytes:      store.Received.Load() - received,
 		Puts:               store.Puts.Load() - puts,
+		WrittenBytes:       store.Written.Load() - written,
 	}, err
 }

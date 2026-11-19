@@ -29,3 +29,7 @@ CI は [VersityGW](../.github/ci/versity/Dockerfile) と [SeaweedFS](../.github/
 | FileStore | S3 なしで永続ストレージを試せる | プロセス間の条件付き書き込みや障害時の原子性を検証する必要 | 別途設計・実装を検討 |
 
 移行する Go コードでは `github.com/s4na/zenbun/s3store` を import し、`zenbun.NewS3Store(zenbun.S3Config{...})` を `s3store.New(s3store.Config{...})` に置き換えてください。`Store` や索引の API と保存済みデータの形式は変わりません。
+
+## 大きなセグメントの作成
+
+8 MiB を超えるオブジェクトの条件付き作成は、VersityGW と SeaweedFS の multipart upload、fake-gcs-server の resumable upload を CI で検証しています。最終チャンクの前に別の書き手が同じキーを作ったときは、その書き手の内容が残ります。独自のストアは `StreamCreator` を実装すると同じ逐次エンコーダーを使えます。既存の `Store` だけを実装するものは従来の PUT 経路を使います。

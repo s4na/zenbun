@@ -126,6 +126,14 @@ jobs:
       - name: Check recall and peak memory
         run: |
           go run ./cmd/measure --corpus .data/documents.jsonl --batch 1000 --output .data/metrics-100k.json
+          python - <<'PYTHON'
+          import json
+          with open(".data/metrics-100k.json") as f:
+              metrics = json.load(f)
+          peak = metrics["operations"]["compact_all"]["peak_heap_delta_bytes"]
+          if not metrics["compactions"] or peak > 128 * 2**20:
+              raise SystemExit(f"Compact budget exceeded or no merges: {peak:,} bytes")
+          PYTHON
           python scripts/report-read-ratio.py .data/metrics-100k.json >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

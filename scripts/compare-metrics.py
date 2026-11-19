@@ -11,7 +11,7 @@ if any(baseline.get(key) != current.get(key) for key in ('documents', 'queries',
     sys.exit(0)
 print('| Metric | Main | PR | Difference |')
 print('|---|---:|---:|---:|')
-for key in ('gets_per_query', 'bytes_per_query', 'single_update_puts', 'manifest_bytes', 'index_to_full_scan_fraction'):
+for key in ('gets_per_query', 'bytes_per_query', 'single_update_puts', 'manifest_bytes', 'index_to_full_scan_fraction', 'compact_write_amplification'):
     before, after = baseline.get(key), current.get(key)
     if before is None or after is None:
         before_text = '未計測' if before is None else f'{before:.4f}'
