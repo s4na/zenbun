@@ -31,9 +31,12 @@ func NewSnapshotMirror(index *Index, store Store, prefix string) (*SnapshotMirro
 	return &SnapshotMirror{index: index, store: store, prefix: m.prefix}, nil
 }
 
-// Apply publishes all changes as one index generation. A failed or conflicting
-// publication leaves the previous generation intact. Unreferenced copies and
-// segments can remain after failures. ETag on Change is ignored.
+// Apply publishes all changes as one index generation. ErrConflict means this
+// batch was not published. A transport error during the manifest write can
+// leave the outcome unknown: the store may have committed the new generation
+// before its reply was lost. Reconcile with the application's source of truth
+// before retrying if other writers can publish newer changes. Unreferenced
+// copies and segments can remain after failures. ETag on Change is ignored.
 func (m *SnapshotMirror) Apply(ctx context.Context, changes []Change) error {
 	documents := make([]SnapshotChange, len(changes))
 	for i, c := range changes {
@@ -51,6 +54,7 @@ type SnapshotChange struct {
 }
 
 // ApplyDocuments atomically publishes searchable text and immutable payloads.
+// Publication errors have the same semantics as Apply.
 func (m *SnapshotMirror) ApplyDocuments(ctx context.Context, changes []SnapshotChange) error {
 	if len(changes) == 0 {
 		return nil
