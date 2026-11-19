@@ -23,10 +23,10 @@ import (
 
 type meter struct {
 	zenbun.Store
-	Gets, Received, Puts atomic.Int64
-	delay                time.Duration
-	serialize            bool
-	mu                   sync.Mutex
+	Gets, Received, Puts, Written atomic.Int64
+	delay                         time.Duration
+	serialize                     bool
+	mu                            sync.Mutex
 }
 
 func (m *meter) Get(ctx context.Context, key string, r *zenbun.ByteRange) (zenbun.Object, error) {
@@ -50,6 +50,7 @@ func (m *meter) Get(ctx context.Context, key string, r *zenbun.ByteRange) (zenbu
 }
 func (m *meter) Put(ctx context.Context, key string, data []byte, opts zenbun.PutOptions) (string, error) {
 	m.Puts.Add(1)
+	m.Written.Add(int64(len(data)))
 	return m.Store.Put(ctx, key, data, opts)
 }
 
@@ -335,6 +336,9 @@ func run() error {
 
 	fraction, inverse := readRatio(sourceBytes, received, len(items))
 	metrics := map[string]any{"source_document_bytes": sourceBytes, "index_to_full_scan_fraction": fraction, "full_scan_to_index_ratio": inverse, "batch_size": *batch, "documents": documents, "queries": len(items), "false_negatives": 0, "search_gets": gets, "search_received_bytes": received, "gets_per_query": float64(gets) / float64(len(items)), "bytes_per_query": float64(received) / float64(len(items)), "single_update_puts": operations["apply_one"].Puts, "manifest_bytes": len(manifest.Data), "build_seconds": operations["build"].Seconds, "latency_sample_queries": sampleCount, "simulated_get_latency_ms": 20, "parallel_latency_seconds": parallelSeconds, "serialized_latency_seconds": serialSeconds, "compactions": compactions, "operations": operations}
+	if sourceBytes > 0 {
+		metrics["compact_write_amplification"] = float64(operations["compact_all"].WrittenBytes) / float64(sourceBytes)
+	}
 	encoded, err := json.MarshalIndent(metrics, "", "  ")
 	if err != nil {
 		return err
