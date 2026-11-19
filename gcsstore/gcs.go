@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	zenbun "github.com/s4na/zenbun"
+	"github.com/s4na/zenbun/internal/httpbody"
 )
 
 // DefaultEndpoint is the Google Cloud Storage JSON API endpoint.
@@ -101,10 +101,7 @@ func (s *Store) objectURL(upload bool, key string, query url.Values) string {
 	return base
 }
 
-// maxErrorBody bounds how much of an HTTP error response is read.
-const maxErrorBody = 64 << 10
-
-func (s *Store) request(ctx context.Context, method, target string, headers http.Header, data []byte, retry bool) (int, http.Header, []byte, error) {
+func (s *Store) request(ctx context.Context, method, target string, headers http.Header, data []byte, retry bool, r *zenbun.ByteRange) (int, http.Header, []byte, error) {
 	attempts := 1
 	if retry {
 		attempts = 4
@@ -140,12 +137,7 @@ func (s *Store) request(ctx context.Context, method, target string, headers http
 			}
 			return 0, nil, nil, fmt.Errorf("gcs: request: %w", err)
 		}
-		reader := io.Reader(resp.Body)
-		if resp.StatusCode >= 400 {
-			// Error bodies are only inspected for an error reason; keep them bounded.
-			reader = io.LimitReader(resp.Body, maxErrorBody)
-		}
-		body, readErr := io.ReadAll(reader)
+		body, readErr := httpbody.Read(resp, r)
 		closeErr := resp.Body.Close()
 		if readErr != nil {
 			return 0, nil, nil, fmt.Errorf("gcs: read response: %w", readErr)
@@ -254,16 +246,14 @@ func (s *Store) Get(ctx context.Context, key string, r *zenbun.ByteRange) (zenbu
 		headers.Set("Range", fmt.Sprintf("bytes=%d-%d", r.Start, r.End-1))
 	}
 	target := s.objectURL(false, key, url.Values{"alt": {"media"}})
-	status, header, body, err := s.request(ctx, http.MethodGet, target, headers, nil, true)
+	status, header, body, err := s.request(ctx, http.MethodGet, target, headers, nil, true, r)
 	if err != nil {
 		return zenbun.Object{}, err
 	}
 	if r == nil && status != http.StatusOK || r != nil && status != http.StatusPartialContent {
 		return zenbun.Object{}, responseError("get", status, body)
 	}
-	if r != nil && int64(len(body)) != r.End-r.Start {
-		return zenbun.Object{}, zenbun.ErrInvalidRange
-	}
+
 	generation := header.Get("X-Goog-Generation")
 	if generation == "" {
 		return zenbun.Object{}, errors.New("gcs get: missing generation")
@@ -295,7 +285,7 @@ func (s *Store) Put(ctx context.Context, key string, data []byte, options zenbun
 		query.Set("ifGenerationMatch", options.IfMatch)
 	}
 	headers := http.Header{"Content-Type": {"application/octet-stream"}}
-	status, _, body, err := s.request(ctx, http.MethodPost, s.objectURL(true, "", query), headers, data, false)
+	status, _, body, err := s.request(ctx, http.MethodPost, s.objectURL(true, "", query), headers, data, false, nil)
 	if err != nil {
 		return "", err
 	}
@@ -317,7 +307,7 @@ func (s *Store) Put(ctx context.Context, key string, data []byte, options zenbun
 
 // Delete implements zenbun.Store.
 func (s *Store) Delete(ctx context.Context, key string) error {
-	status, _, body, err := s.request(ctx, http.MethodDelete, s.objectURL(false, key, nil), nil, nil, false)
+	status, _, body, err := s.request(ctx, http.MethodDelete, s.objectURL(false, key, nil), nil, nil, false, nil)
 	if err != nil {
 		return err
 	}
@@ -340,7 +330,7 @@ func (s *Store) List(ctx context.Context, prefix string) ([]zenbun.ObjectInfo, e
 		if token != "" {
 			query.Set("pageToken", token)
 		}
-		status, _, body, err := s.request(ctx, http.MethodGet, s.objectURL(false, "", query), nil, nil, true)
+		status, _, body, err := s.request(ctx, http.MethodGet, s.objectURL(false, "", query), nil, nil, true, nil)
 		if err != nil {
 			return nil, err
 		}

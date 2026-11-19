@@ -21,7 +21,7 @@ func TestS3EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, _, _, err := store.request(ctx, http.MethodPut, "", nil, nil, nil, false)
+	status, _, _, err := store.request(ctx, http.MethodPut, "", nil, nil, nil, false, nil)
 	if err != nil || (status != http.StatusOK && status != http.StatusConflict) {
 		t.Fatalf("create bucket: %d %v", status, err)
 	}
