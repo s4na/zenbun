@@ -185,3 +185,74 @@ func TestVersionThreeRejectsBadDocumentTable(t *testing.T) {
 		}
 	}
 }
+
+func TestOpaqueETagSurvivesCompaction(t *testing.T) {
+	ctx := t.Context()
+	store := &MemoryStore{}
+	index, err := Open(store, "index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := []string{string([]byte{0xff}), "�"}
+	for n, tag := range tags {
+		key := fmt.Sprint(n)
+		if err := index.Apply(ctx, []Change{{Key: key, Data: []byte("cat"), ETag: tag}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if changed, err := index.Compact(ctx); err != nil || !changed {
+		t.Fatalf("compact: %t %v", changed, err)
+	}
+	m, _, err := index.loadManifest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := index.segment(ctx, m.Segments[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := segmentDocumentTable(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n, tag := range tags {
+		if got := state[fmt.Sprint(n)].ETag; got != tag {
+			t.Errorf("tag %d: %x, want %x", n, got, tag)
+		}
+	}
+	legacy := &segmentReader{ref: segmentRef{Documents: 1}, docFirst: []string{"a"}}
+	rows, err := legacy.decodeDocumentBlock(0, []byte(`[{"key":"a","etag":"�"}]`))
+	if err != nil || rows[0].ETag != "" {
+		t.Fatalf("legacy row: %v, %v", rows, err)
+	}
+}
+
+func TestSyncDistinguishesOpaqueETagFromReplacementCharacter(t *testing.T) {
+	ctx := t.Context()
+	source := &MemoryStore{}
+	index, err := Open(&MemoryStore{}, "index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []struct{ etag, body string }{{string([]byte{0xff}), "old"}, {"�", "new"}} {
+		source.objects = map[string]memoryObject{"docs/a": {etag: version.etag, data: []byte(version.body)}}
+		if err := index.Sync(ctx, source, "docs/"); err != nil {
+			t.Fatal(err)
+		}
+		keys, err := index.Search(ctx, version.body)
+		if err != nil || len(keys) != 1 || keys[0] != "docs/a" {
+			t.Fatalf("search %q: %v %v", version.body, keys, err)
+		}
+	}
+	m, _, err := index.loadManifest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Sync(ctx, source, "docs/"); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := index.loadManifest(ctx)
+	if err != nil || after.Generation != m.Generation {
+		t.Fatalf("unchanged sync: %v %v", after, err)
+	}
+}
