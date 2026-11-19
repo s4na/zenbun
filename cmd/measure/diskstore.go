@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -187,4 +188,45 @@ func (s *diskStore) List(ctx context.Context, prefix string) ([]zenbun.ObjectInf
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
 	return result, nil
+}
+
+// CreateStream stages only the benchmark's disk-backed copy. Encoding may
+// read other objects in this store, so take the lock only to publish.
+func (s *diskStore) CreateStream(ctx context.Context, key string, produce func(io.Writer) error) error {
+	path, err := s.path(key)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(s.dir, ".upload-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	hash := sha256.New()
+	out := bufio.NewWriterSize(io.MultiWriter(tmp, hash), 64<<10)
+	err = produce(out)
+	if err == nil {
+		err = out.Flush()
+	}
+	closeErr := tmp.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := s.etag(path); err == nil {
+		return zenbun.ErrConflict
+	} else if !errors.Is(err, zenbun.ErrNotFound) {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return writeFile(path+etagSuffix, []byte("\""+hex.EncodeToString(hash.Sum(nil))+"\""))
 }

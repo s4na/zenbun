@@ -29,4 +29,5 @@ func TestGCSEndToEnd(t *testing.T) {
 		t.Fatalf("create bucket: %d %v", status, err)
 	}
 	storetest.Run(t, store)
+	storetest.RunStream(t, store, store)
 }

@@ -256,3 +256,15 @@ func TestSyncDistinguishesOpaqueETagFromReplacementCharacter(t *testing.T) {
 		t.Fatalf("unchanged sync: %v %v", after, err)
 	}
 }
+
+func encodeSegment(docs map[string]indexedDocument) ([]byte, error) {
+	var out bytes.Buffer
+	w := newSegmentWriter(&out, len(docs))
+	if err := writeDocumentsSegment(w, docs); err != nil {
+		return nil, err
+	}
+	if err := w.finish(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}

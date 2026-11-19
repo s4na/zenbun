@@ -13,3 +13,9 @@ S3 の一覧の `prefix` は文字列の先頭一致であり、`/` をディレ
 ## 競合と再試行
 
 `Reclaim` は安全な削除の境界を設けるため、マニフェストを条件付きで更新します。同期や追加と同時に動かすと `ErrConflict` を返す場合があります。CLI は競合を最大 3 回試しますが、競合が続く環境での成功は保証しません。その場合は時間を空けて再実行してください。`RetryConflict` を直接使う場合も、再試行ごとに最新の状態を読み直してください。
+
+## 大きいセグメントのアップロード
+
+S3 は 8 MiB を超えるセグメントを multipart で送信し、CompleteMultipartUpload に `If-None-Match: *` を指定します。失敗時は AbortMultipartUpload を試みるため `s3:AbortMultipartUpload` 権限が必要です。プロセス停止などで残ったパートのため、バケットに未完了 multipart upload を期限後に削除するライフサイクルルールを設定してください。
+
+GCS は `ifGenerationMatch=0` で resumable session を開始し、チャンクの受信位置を確認してから続きを送ります。中断時はセッションの取り消しを試みます。いずれもアップロード完了後に manifest を条件付きで公開します。

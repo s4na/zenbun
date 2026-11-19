@@ -113,19 +113,17 @@ func terms(text string) []string {
 // dictionary blocks, a sparse index and a fixed-size footer. The inversion
 // holds the whole batch; the writer itself keeps only the sparse indexes, the
 // Bloom filter and one block of each kind.
-func encodeSegment(docs map[string]indexedDocument) ([]byte, error) {
+func writeDocumentsSegment(w *segmentWriter, docs map[string]indexedDocument) error {
 	keys := make([]string, 0, len(docs))
 	for key := range docs {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	var out bytes.Buffer
-	w := newSegmentWriter(&out, len(keys))
 	posting := make(map[string][]uint64)
 	for n, key := range keys {
 		doc := docs[key]
 		if err := w.addDocument(documentRecord{Key: key, Deleted: doc.Deleted, ETag: doc.ETag}); err != nil {
-			return nil, err
+			return err
 		}
 		if !doc.Deleted {
 			for _, term := range doc.Terms {
@@ -140,13 +138,10 @@ func encodeSegment(docs map[string]indexedDocument) ([]byte, error) {
 	sort.Strings(names)
 	for _, term := range names {
 		if err := w.addPosting(term, posting[term]); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	if err := w.finish(); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
+	return nil
 }
 
 // segmentWriter writes a v3 segment in one pass. Documents must be added in
@@ -156,6 +151,7 @@ func encodeSegment(docs map[string]indexedDocument) ([]byte, error) {
 type segmentWriter struct {
 	w         io.Writer
 	offset    int64
+	limit     int64
 	documents int
 	written   int
 	docBlock  []documentRecord
@@ -177,7 +173,14 @@ func (s *segmentWriter) write(data []byte) {
 	if s.err != nil {
 		return
 	}
+	if s.limit > 0 && int64(len(data)) > s.limit-s.offset {
+		s.err = errCompactSize
+		return
+	}
 	n, err := s.w.Write(data)
+	if n != len(data) && err == nil {
+		err = io.ErrShortWrite
+	}
 	s.offset += int64(n)
 	s.err = err
 }

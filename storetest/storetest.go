@@ -3,8 +3,10 @@
 package storetest
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -124,5 +126,57 @@ func Run(t *testing.T, store zenbun.Store) {
 	matches, err = mirror.Search(ctx, "日本語")
 	if err != nil || len(matches) != 0 {
 		t.Fatalf("mirror delete: %+v %v", matches, err)
+	}
+}
+
+// RunStream checks publication only after producer success, including a
+// competing writer between the first uploaded part and final publication.
+func RunStream(t *testing.T, store zenbun.Store, stream zenbun.StreamCreator) {
+	t.Helper()
+	ctx := t.Context()
+	part := bytes.Repeat([]byte{0x65}, (8<<20)+37)
+	for _, tc := range []string{"complete", "abort", "conflict"} {
+		t.Run(tc, func(t *testing.T) {
+			key := "stream/" + tc
+			failed := errors.New("stop producer")
+			err := stream.CreateStream(ctx, key, func(w io.Writer) error {
+				if _, err := w.Write(part); err != nil {
+					return err
+				}
+				if tc == "abort" {
+					return failed
+				}
+				if tc == "conflict" {
+					_, err := store.Put(ctx, key, []byte("winner"), zenbun.PutOptions{IfNoneMatch: true})
+					return err
+				}
+				return nil
+			})
+			switch tc {
+			case "complete":
+				if err != nil {
+					t.Fatal(err)
+				}
+				obj, err := store.Get(ctx, key, nil)
+				if err != nil || !bytes.Equal(obj.Data, part) {
+					t.Fatalf("completed object: %v, %d bytes", err, len(obj.Data))
+				}
+			case "abort":
+				if !errors.Is(err, failed) {
+					t.Fatal(err)
+				}
+				if _, err := store.Get(ctx, key, nil); !errors.Is(err, zenbun.ErrNotFound) {
+					t.Fatalf("aborted object: %v", err)
+				}
+			case "conflict":
+				if !errors.Is(err, zenbun.ErrConflict) {
+					t.Fatalf("concurrent create: %v", err)
+				}
+				obj, err := store.Get(ctx, key, nil)
+				if err != nil || string(obj.Data) != "winner" {
+					t.Fatalf("winner lost: %v", err)
+				}
+			}
+		})
 	}
 }

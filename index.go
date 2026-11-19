@@ -1,6 +1,7 @@
 package zenbun
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -153,23 +155,40 @@ func (i *Index) writeManifest(ctx context.Context, m manifest, etag string) (str
 }
 
 func (i *Index) writeSegment(ctx context.Context, docs map[string]indexedDocument) (segmentRef, error) {
-	data, err := encodeSegment(docs)
-	if err != nil {
-		return segmentRef{}, err
-	}
-	return i.storeSegment(ctx, data, len(docs))
+	return i.createSegment(ctx, len(docs), 0, func(w *segmentWriter) error { return writeDocumentsSegment(w, docs) })
 }
 
-func (i *Index) storeSegment(ctx context.Context, data []byte, documents int) (segmentRef, error) {
+func (i *Index) createSegment(ctx context.Context, documents int, limit int64, encode func(*segmentWriter) error) (segmentRef, error) {
 	id, err := randomID()
 	if err != nil {
 		return segmentRef{}, err
 	}
 	key := i.prefix + "segments/" + id
-	if _, err := i.store.Put(ctx, key, data, PutOptions{IfNoneMatch: true}); err != nil {
+	var size int64
+	produce := func(out io.Writer) error {
+		w := newSegmentWriter(out, documents)
+		w.limit = limit
+		if err := encode(w); err != nil {
+			return err
+		}
+		if err := w.finish(); err != nil {
+			return err
+		}
+		size = w.offset
+		return nil
+	}
+	if stream, ok := i.store.(StreamCreator); ok {
+		err = stream.CreateStream(ctx, key, produce)
+	} else {
+		var buf bytes.Buffer
+		if err = produce(&buf); err == nil {
+			_, err = i.store.Put(ctx, key, buf.Bytes(), PutOptions{IfNoneMatch: true})
+		}
+	}
+	if err != nil {
 		return segmentRef{}, err
 	}
-	return segmentRef{Key: key, Size: int64(len(data)), Documents: documents}, nil
+	return segmentRef{Key: key, Size: size, Documents: documents}, nil
 }
 
 // Change adds or replaces a document, or deletes it when Delete is true.
@@ -698,31 +717,47 @@ func (i *Index) Compact(ctx context.Context) (bool, error) {
 
 func (i *Index) compactManifest(ctx context.Context, m *manifest) (bool, error) {
 	at := -1
-	for n := 0; n+1 < len(m.Segments); n++ {
-		a, b := m.Segments[n].Size, m.Segments[n+1].Size
-		if a <= b && b/8 <= a || b < a && a/8 <= b {
-			at = n
-			break
+	var ref segmentRef
+	// Prefer the cheapest similarly sized neighbours. Break ties toward the
+	// newest pair. A large backlog can also merge unequal eligible pairs.
+	type pair struct {
+		at      int
+		size    int64
+		similar bool
+	}
+	var pairs []pair
+	limit := i.compactLimit()
+	for n := len(m.Segments) - 2; n >= 0; n-- {
+		a, b := m.Segments[n], m.Segments[n+1]
+		if a.Size > limit-b.Size || a.Documents > maxCompactDocuments-b.Documents {
+			continue
+		}
+		similar := max(a.Size, b.Size)/8 <= min(a.Size, b.Size)
+		if similar || len(m.Segments) > 16 {
+			pairs = append(pairs, pair{n, a.Size + b.Size, similar})
 		}
 	}
-	// Highly unequal alternating segment sizes may leave no comparable
-	// neighbours. Bound that backlog by merging the least expensive adjacent
-	// pair when it grows beyond the normal size tiers.
-	if at < 0 && len(m.Segments) > 16 {
-		best := ^uint64(0)
-		for n := 0; n+1 < len(m.Segments); n++ {
-			cost := uint64(m.Segments[n].Size) + uint64(m.Segments[n+1].Size)
-			if cost < best {
-				at, best = n, cost
-			}
+	sort.SliceStable(pairs, func(i, j int) bool {
+		if pairs[i].similar != pairs[j].similar {
+			return pairs[i].similar
 		}
+		return pairs[i].size < pairs[j].size
+	})
+	for _, candidate := range pairs {
+		n := candidate.at
+		var err error
+		ref, err = i.mergeSegments(ctx, m.Segments[n], m.Segments[n+1], n == 0)
+		if errors.Is(err, errCompactSize) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		at = n
+		break
 	}
 	if at < 0 {
 		return false, nil
-	}
-	ref, err := i.mergeSegments(ctx, m.Segments[at], m.Segments[at+1], at == 0)
-	if err != nil {
-		return false, err
 	}
 	segments := make([]segmentRef, 0, len(m.Segments)-1)
 	segments = append(segments, m.Segments[:at]...)

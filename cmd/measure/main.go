@@ -8,8 +8,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +54,21 @@ func (m *meter) Put(ctx context.Context, key string, data []byte, opts zenbun.Pu
 	m.Puts.Add(1)
 	m.Written.Add(int64(len(data)))
 	return m.Store.Put(ctx, key, data, opts)
+}
+
+type countedWriter struct {
+	io.Writer
+	total *atomic.Int64
+}
+
+func (w countedWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.total.Add(int64(n))
+	return n, err
+}
+func (m *meter) CreateStream(ctx context.Context, key string, produce func(io.Writer) error) error {
+	m.Puts.Add(1)
+	return m.Store.(zenbun.StreamCreator).CreateStream(ctx, key, func(w io.Writer) error { return produce(countedWriter{w, &m.Written}) })
 }
 
 type document struct{ ID, Text string }
@@ -297,6 +314,13 @@ func run() error {
 		return err
 	}
 
+	// Include the measurement update when comparing candidates before and after the merge.
+	for n, item := range items {
+		results[n], err = searchIndex.Search(ctx, item.Query)
+		if err != nil {
+			return err
+		}
+	}
 	compactions := 0
 	if err := measure("compact_all", func() error {
 		index, err := open("index/")
@@ -314,6 +338,19 @@ func run() error {
 		return err
 	}
 
+	after, err := open("index/")
+	if err != nil {
+		return err
+	}
+	for n, item := range items {
+		keys, err := after.Search(ctx, item.Query)
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(keys, results[n]) {
+			return fmt.Errorf("compact changed candidates for %q", item.Query)
+		}
+	}
 	runSync := func() error {
 		index, err := open("sync-index/")
 		if err != nil {
