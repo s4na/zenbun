@@ -11,32 +11,43 @@ import (
 // for one sequential merge. The view is private to one input and goroutine.
 type compactStore struct {
 	Store
-	ref   segmentRef
+	ref     segmentRef
+	windows [2]compactWindow
+	next    int
+}
+
+type compactWindow struct {
 	start int64
 	data  []byte
 }
 
 func (s *compactStore) Get(ctx context.Context, key string, r *ByteRange) (Object, error) {
-	const window = 256 << 10
+	const window = 8 << 20
 	if key != s.ref.Key || r == nil || !validExtent(r.Start, r.End-r.Start, s.ref.Size) {
 		return Object{}, ErrInvalidRange
 	}
 	if err := ctx.Err(); err != nil {
 		return Object{}, err
 	}
-	if !validExtent(r.Start-s.start, r.End-r.Start, int64(len(s.data))) {
-		if r.End-r.Start > window {
-			return s.Store.Get(ctx, key, r)
+	// The dictionary for a group of values follows them on disk. Retain
+	// the preceding window when reading ahead crosses its boundary.
+	for _, cached := range s.windows {
+		if validExtent(r.Start-cached.start, r.End-r.Start, int64(len(cached.data))) {
+			return Object{Data: cached.data[r.Start-cached.start : r.End-cached.start]}, nil
 		}
-		start := r.Start - r.Start%window
-		size := max(min(int64(window), s.ref.Size-start), r.End-start)
-		data, err := readRange(ctx, s.Store, key, start, size)
-		if err != nil {
-			return Object{}, err
-		}
-		s.start, s.data = start, data
 	}
-	return Object{Data: s.data[r.Start-s.start : r.End-s.start]}, nil
+	if r.End-r.Start > window {
+		return s.Store.Get(ctx, key, r)
+	}
+	start := r.Start - r.Start%window
+	size := max(min(int64(window), s.ref.Size-start), r.End-start)
+	data, err := readRange(ctx, s.Store, key, start, size)
+	if err != nil {
+		return Object{}, err
+	}
+	s.windows[s.next] = compactWindow{start: start, data: data}
+	s.next = (s.next + 1) % len(s.windows)
+	return Object{Data: data[r.Start-start : r.End-start]}, nil
 }
 
 // compactInput walks an immutable segment's posting entries in term order.
@@ -52,10 +63,11 @@ type compactInput struct {
 }
 
 func (i *Index) compactInput(ctx context.Context, ref segmentRef) (*compactInput, error) {
-	reader, err := openSegment(ctx, &compactStore{Store: i.store, ref: ref}, ref)
+	reader, err := openSegment(ctx, i.store, ref)
 	if err != nil {
 		return nil, err
 	}
+	reader.store = &compactStore{Store: i.store, ref: ref}
 	var records []documentRecord
 	for first := 0; first < len(reader.docFirst); first += documentBatchBlocks {
 		last := min(first+documentBatchBlocks, len(reader.docFirst)) - 1
