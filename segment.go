@@ -108,7 +108,7 @@ func terms(text string) []string {
 	return out
 }
 
-// encodeSegment inverts documents into postings and streams them through a
+// writeDocumentsSegment inverts documents into postings and streams them through a
 // segmentWriter. A segment contains a sorted document table, posting lists,
 // dictionary blocks, a sparse index and a fixed-size footer. The inversion
 // holds the whole batch; the writer itself keeps only the sparse indexes, the

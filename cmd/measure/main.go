@@ -23,8 +23,13 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-type meter struct {
+type measuredStore interface {
 	zenbun.Store
+	zenbun.StreamCreator
+}
+
+type meter struct {
+	measuredStore
 	Gets, Received, Puts, Written atomic.Int64
 	delay                         time.Duration
 	serialize                     bool
@@ -45,7 +50,7 @@ func (m *meter) Get(ctx context.Context, key string, r *zenbun.ByteRange) (zenbu
 		case <-timer.C:
 		}
 	}
-	obj, err := m.Store.Get(ctx, key, r)
+	obj, err := m.measuredStore.Get(ctx, key, r)
 	m.Gets.Add(1)
 	m.Received.Add(int64(len(obj.Data)))
 	return obj, err
@@ -53,7 +58,7 @@ func (m *meter) Get(ctx context.Context, key string, r *zenbun.ByteRange) (zenbu
 func (m *meter) Put(ctx context.Context, key string, data []byte, opts zenbun.PutOptions) (string, error) {
 	m.Puts.Add(1)
 	m.Written.Add(int64(len(data)))
-	return m.Store.Put(ctx, key, data, opts)
+	return m.measuredStore.Put(ctx, key, data, opts)
 }
 
 type countedWriter struct {
@@ -68,7 +73,7 @@ func (w countedWriter) Write(p []byte) (int, error) {
 }
 func (m *meter) CreateStream(ctx context.Context, key string, produce func(io.Writer) error) error {
 	m.Puts.Add(1)
-	return m.Store.(zenbun.StreamCreator).CreateStream(ctx, key, func(w io.Writer) error { return produce(countedWriter{w, &m.Written}) })
+	return m.measuredStore.CreateStream(ctx, key, func(w io.Writer) error { return produce(countedWriter{w, &m.Written}) })
 }
 
 type document struct{ ID, Text string }
@@ -131,7 +136,7 @@ func run() error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dataDir) }()
-	var backend zenbun.Store
+	var backend measuredStore
 	if *endpoint != "" {
 		backend, err = s3store.New(s3store.Config{Endpoint: *endpoint, Bucket: "zenbun-measure", AccessKey: "testaccess", SecretKey: "testsecret"})
 		if err != nil {
@@ -149,7 +154,7 @@ func run() error {
 		return err
 	}
 	ctx := context.Background()
-	store := &meter{Store: backend}
+	store := &meter{measuredStore: backend}
 	open := func(prefix string) (*zenbun.Index, error) { return zenbun.Open(store, prefix) }
 
 	data, err := os.ReadFile(*queries)

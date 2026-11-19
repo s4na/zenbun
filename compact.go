@@ -198,9 +198,10 @@ func (in *compactInput) mappedPosting(ctx context.Context) ([]uint64, error) {
 		}
 		for len(data) > 0 {
 			delta, n := binary.Uvarint(data)
+			// Retry a split varint from its first byte in the next range.
 			if n == 0 && offset+int64(len(data)) < end {
 				break
-			} // retry a split varint in the next range
+			}
 			if n <= 0 || delta == 0 || delta > uint64(in.reader.ref.Documents)-id {
 				return nil, errors.New("zenbun: invalid compact posting")
 			}

@@ -747,7 +747,8 @@ func (i *Index) compactManifest(ctx context.Context, m *manifest) (bool, error) 
 		n := candidate.at
 		var err error
 		ref, err = i.mergeSegments(ctx, m.Segments[n], m.Segments[n+1], n == 0)
-		if errors.Is(err, errCompactSize) {
+		// A joined cleanup error must still be reported to the operator.
+		if err == errCompactSize {
 			continue
 		}
 		if err != nil {
