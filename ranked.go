@@ -146,7 +146,8 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 // RankedKeys verifies and ranks all candidates once, and returns the ordered
 // keys without reading their payloads a second time. Applications that render
 // summaries can capture them in decode and page those summaries in key order.
-// Limit and After must be zero. MaxCandidates and MaxBytes still bound the work.
+// Limit and After must be zero. Scope is ignored because no cursor is returned.
+// MaxCandidates and MaxBytes still bound the work.
 func (s *Snapshot) RankedKeys(ctx context.Context, q Query, options RankedOptions, decode func(string, []byte) (RankedFields, bool, error)) ([]string, error) {
 	if options.Limit != 0 || options.After != "" {
 		return nil, errors.New("zenbun: ranked keys do not accept pagination options")
