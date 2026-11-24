@@ -52,9 +52,10 @@ type blockIndex struct {
 // documentRecord is one row of the v3 document table. Its position in key
 // order, starting at 1, is the document ID used by postings.
 type documentRecord struct {
-	Key     string `json:"key"`
-	Deleted bool   `json:"deleted,omitempty"`
-	ETag    string `json:"etag,omitempty"`
+	Key       string `json:"key"`
+	Deleted   bool   `json:"deleted,omitempty"`
+	ETag      string `json:"etag,omitempty"`
+	ETagBytes []byte `json:"etag_bytes,omitempty"`
 }
 
 type segmentIndex struct {
@@ -107,24 +108,22 @@ func terms(text string) []string {
 	return out
 }
 
-// encodeSegment inverts documents into postings and streams them through a
+// writeDocumentsSegment inverts documents into postings and streams them through a
 // segmentWriter. A segment contains a sorted document table, posting lists,
 // dictionary blocks, a sparse index and a fixed-size footer. The inversion
 // holds the whole batch; the writer itself keeps only the sparse indexes, the
 // Bloom filter and one block of each kind.
-func encodeSegment(docs map[string]indexedDocument) ([]byte, error) {
+func writeDocumentsSegment(w *segmentWriter, docs map[string]indexedDocument) error {
 	keys := make([]string, 0, len(docs))
 	for key := range docs {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	var out bytes.Buffer
-	w := newSegmentWriter(&out, len(keys))
 	posting := make(map[string][]uint64)
 	for n, key := range keys {
 		doc := docs[key]
 		if err := w.addDocument(documentRecord{Key: key, Deleted: doc.Deleted, ETag: doc.ETag}); err != nil {
-			return nil, err
+			return err
 		}
 		if !doc.Deleted {
 			for _, term := range doc.Terms {
@@ -139,13 +138,10 @@ func encodeSegment(docs map[string]indexedDocument) ([]byte, error) {
 	sort.Strings(names)
 	for _, term := range names {
 		if err := w.addPosting(term, posting[term]); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	if err := w.finish(); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
+	return nil
 }
 
 // segmentWriter writes a v3 segment in one pass. Documents must be added in
@@ -155,6 +151,7 @@ func encodeSegment(docs map[string]indexedDocument) ([]byte, error) {
 type segmentWriter struct {
 	w         io.Writer
 	offset    int64
+	limit     int64
 	documents int
 	written   int
 	docBlock  []documentRecord
@@ -176,7 +173,14 @@ func (s *segmentWriter) write(data []byte) {
 	if s.err != nil {
 		return
 	}
+	if s.limit > 0 && int64(len(data)) > s.limit-s.offset {
+		s.err = errCompactSize
+		return
+	}
 	n, err := s.w.Write(data)
+	if n != len(data) && err == nil {
+		err = io.ErrShortWrite
+	}
 	s.offset += int64(n)
 	s.err = err
 }
@@ -239,6 +243,11 @@ func (s *segmentWriter) addDocument(record documentRecord) error {
 	s.written++
 	s.lastKey = record.Key
 	bloomAdd(s.bloom, record.Key)
+	// Legacy JSON strings containing U+FFFD may already have lost bytes.
+	if strings.ContainsRune(record.ETag, utf8.RuneError) {
+		record.ETagBytes = []byte(record.ETag)
+		record.ETag = ""
+	}
 	s.docBlock = append(s.docBlock, record)
 	if len(s.docBlock) == documentBlockSize {
 		s.flushDocuments()

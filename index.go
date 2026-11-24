@@ -1,6 +1,7 @@
 package zenbun
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -77,6 +78,7 @@ type segmentRef struct {
 type manifest struct {
 	Version    int          `json:"version"`
 	Generation string       `json:"generation"`
+	Barrier    string       `json:"reclaim_barrier,omitempty"`
 	Segments   []segmentRef `json:"segments"`
 }
 
@@ -134,8 +136,13 @@ func (i *Index) publishWithETag(ctx context.Context, m manifest, etag string) (s
 	if err != nil {
 		return "", err
 	}
-	m.Version = manifestVersion
 	m.Generation = id
+	m.Barrier = ""
+	return i.writeManifest(ctx, m, etag)
+}
+
+func (i *Index) writeManifest(ctx context.Context, m manifest, etag string) (string, error) {
+	m.Version = manifestVersion
 	data, err := json.Marshal(m)
 	if err != nil {
 		return "", err
@@ -148,19 +155,40 @@ func (i *Index) publishWithETag(ctx context.Context, m manifest, etag string) (s
 }
 
 func (i *Index) writeSegment(ctx context.Context, docs map[string]indexedDocument) (segmentRef, error) {
-	data, err := encodeSegment(docs)
-	if err != nil {
-		return segmentRef{}, err
-	}
+	return i.createSegment(ctx, len(docs), 0, func(w *segmentWriter) error { return writeDocumentsSegment(w, docs) })
+}
+
+func (i *Index) createSegment(ctx context.Context, documents int, limit int64, encode func(*segmentWriter) error) (segmentRef, error) {
 	id, err := randomID()
 	if err != nil {
 		return segmentRef{}, err
 	}
 	key := i.prefix + "segments/" + id
-	if _, err := i.store.Put(ctx, key, data, PutOptions{IfNoneMatch: true}); err != nil {
+	var size int64
+	produce := func(out io.Writer) error {
+		w := newSegmentWriter(out, documents)
+		w.limit = limit
+		if err := encode(w); err != nil {
+			return err
+		}
+		if err := w.finish(); err != nil {
+			return err
+		}
+		size = w.offset
+		return nil
+	}
+	if stream, ok := i.store.(StreamCreator); ok {
+		err = stream.CreateStream(ctx, key, produce)
+	} else {
+		var buf bytes.Buffer
+		if err = produce(&buf); err == nil {
+			_, err = i.store.Put(ctx, key, buf.Bytes(), PutOptions{IfNoneMatch: true})
+		}
+	}
+	if err != nil {
 		return segmentRef{}, err
 	}
-	return segmentRef{Key: key, Size: int64(len(data)), Documents: len(docs)}, nil
+	return segmentRef{Key: key, Size: size, Documents: documents}, nil
 }
 
 // Change adds or replaces a document, or deletes it when Delete is true.
@@ -249,8 +277,19 @@ func (r *segmentReader) decodeDocumentBlock(block int, data []byte) ([]documentR
 	if err := json.Unmarshal(data, &records); err != nil || len(records) != expected || block >= len(r.docFirst) || records[0].Key != r.docFirst[block] {
 		return nil, invalid
 	}
-	for n, record := range records {
-		if !utf8.ValidString(record.Key) || !utf8.ValidString(record.ETag) || n > 0 && records[n-1].Key >= record.Key {
+	for n := range records {
+		record := &records[n]
+		if len(record.ETagBytes) > 0 {
+			if record.ETag != "" {
+				return nil, invalid
+			}
+			record.ETag = string(record.ETagBytes)
+			record.ETagBytes = nil
+		} else if strings.ContainsRune(record.ETag, utf8.RuneError) {
+			// Force Sync to refresh a possibly lossy legacy version.
+			record.ETag = ""
+		}
+		if !utf8.ValidString(record.Key) || n > 0 && records[n-1].Key >= record.Key {
 			return nil, invalid
 		}
 	}
@@ -636,31 +675,6 @@ func segmentPostings(ctx context.Context, reader *segmentReader, queryTerms []st
 	return candidates, nil
 }
 
-// segmentSnapshot presents the document and metadata ranges without copying
-// them into a second in-memory store. The postings gap is deliberately absent.
-type segmentSnapshot struct {
-	Store
-	key              string
-	head, tail       []byte
-	tailOffset, size int64
-}
-
-func (s *segmentSnapshot) Get(ctx context.Context, key string, r *ByteRange) (Object, error) {
-	if err := ctx.Err(); err != nil {
-		return Object{}, err
-	}
-	if key != s.key || r == nil || r.Start < 0 || r.End <= r.Start || r.End > s.size {
-		return Object{}, ErrInvalidRange
-	}
-	if r.End <= int64(len(s.head)) {
-		return Object{Data: s.head[r.Start:r.End]}, nil
-	}
-	if r.Start >= s.tailOffset {
-		return Object{Data: s.tail[r.Start-s.tailOffset : r.End-s.tailOffset]}, nil
-	}
-	return Object{}, io.ErrUnexpectedEOF
-}
-
 // segmentDocumentTable reads the document table, which holds deletion state
 // and ETags but no terms, in batched ranges.
 func segmentDocumentTable(ctx context.Context, reader *segmentReader) (map[string]indexedDocument, error) {
@@ -679,57 +693,6 @@ func segmentDocumentTable(ctx context.Context, reader *segmentReader) (map[strin
 	}
 	if len(docs) != reader.ref.Documents {
 		return nil, errors.New("zenbun: invalid segment document count")
-	}
-	return docs, nil
-}
-
-// segmentContents rebuilds each v3 document's terms from the postings, since
-// v3 records do not store them. It reads the segment once; the result is as
-// large as the segment's postings. Issue #66 replaces this with a streaming
-// merge of postings.
-func segmentContents(ctx context.Context, reader *segmentReader) (map[string]indexedDocument, error) {
-	data, err := readRange(ctx, reader.store, reader.ref.Key, 0, reader.ref.Size)
-	if err != nil {
-		return nil, err
-	}
-	snapshot := &segmentSnapshot{Store: reader.store, key: reader.ref.Key, head: data, tailOffset: reader.ref.Size, size: reader.ref.Size}
-	reader, err = openSegment(ctx, snapshot, reader.ref)
-	if err != nil {
-		return nil, err
-	}
-	records := make([]documentRecord, 0, reader.ref.Documents)
-	for block := range reader.docFirst {
-		part, err := reader.documentBlock(ctx, block)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, part...)
-	}
-	if len(records) != reader.ref.Documents {
-		return nil, errors.New("zenbun: invalid segment document count")
-	}
-	termsByID := make([][]string, len(records))
-	for block := range reader.blocks {
-		entries, err := reader.dictionary(ctx, block)
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range entries {
-			if !strings.HasPrefix(entry.Term, "t") {
-				continue
-			}
-			term := entry.Term[1:]
-			err := validatePosting(data[entry.Offset:entry.Offset+entry.Length], len(records), func(id uint64) {
-				termsByID[id-1] = append(termsByID[id-1], term)
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	docs := make(map[string]indexedDocument, len(records))
-	for n, record := range records {
-		docs[record.Key] = indexedDocument{Deleted: record.Deleted, ETag: record.ETag, Terms: termsByID[n]}
 	}
 	return docs, nil
 }
@@ -754,58 +717,52 @@ func (i *Index) Compact(ctx context.Context) (bool, error) {
 
 func (i *Index) compactManifest(ctx context.Context, m *manifest) (bool, error) {
 	at := -1
-	for n := 0; n+1 < len(m.Segments); n++ {
-		a, b := m.Segments[n].Size, m.Segments[n+1].Size
-		if a <= b && b/8 <= a || b < a && a/8 <= b {
-			at = n
-			break
+	var ref segmentRef
+	// Prefer the cheapest similarly sized neighbours. Break ties toward the
+	// newest pair. A large backlog can also merge unequal eligible pairs.
+	type pair struct {
+		at      int
+		size    int64
+		similar bool
+	}
+	var pairs []pair
+	limit := i.compactLimit()
+	for n := len(m.Segments) - 2; n >= 0; n-- {
+		a, b := m.Segments[n], m.Segments[n+1]
+		if a.Size > limit-b.Size || a.Documents > maxCompactDocuments-b.Documents {
+			continue
+		}
+		similar := max(a.Size, b.Size)/8 <= min(a.Size, b.Size)
+		if similar || len(m.Segments) > 16 {
+			pairs = append(pairs, pair{n, a.Size + b.Size, similar})
 		}
 	}
-	// Highly unequal alternating segment sizes may leave no comparable
-	// neighbours. Bound that backlog by merging the least expensive adjacent
-	// pair when it grows beyond the normal size tiers.
-	if at < 0 && len(m.Segments) > 16 {
-		best := ^uint64(0)
-		for n := 0; n+1 < len(m.Segments); n++ {
-			cost := uint64(m.Segments[n].Size) + uint64(m.Segments[n+1].Size)
-			if cost < best {
-				at, best = n, cost
-			}
+	sort.SliceStable(pairs, func(i, j int) bool {
+		if pairs[i].similar != pairs[j].similar {
+			return pairs[i].similar
 		}
+		return pairs[i].size < pairs[j].size
+	})
+	for _, candidate := range pairs {
+		n := candidate.at
+		var err error
+		ref, err = i.mergeSegments(ctx, m.Segments[n], m.Segments[n+1], n == 0)
+		// A joined cleanup error must still be reported to the operator.
+		if err == errCompactSize {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		at = n
+		break
 	}
 	if at < 0 {
 		return false, nil
 	}
-	docs := make(map[string]indexedDocument)
-	for _, ref := range m.Segments[at : at+2] {
-		reader, err := i.segment(ctx, ref)
-		if err != nil {
-			return false, err
-		}
-		part, err := segmentContents(ctx, reader)
-		if err != nil {
-			return false, err
-		}
-		for key, doc := range part {
-			docs[key] = doc
-		}
-	}
-	// At the oldest edge there is no earlier version to suppress, so those
-	// tombstones can be removed. Elsewhere they must survive the merge.
-	if at == 0 {
-		for key, doc := range docs {
-			if doc.Deleted {
-				delete(docs, key)
-			}
-		}
-	}
 	segments := make([]segmentRef, 0, len(m.Segments)-1)
 	segments = append(segments, m.Segments[:at]...)
-	if len(docs) != 0 {
-		ref, err := i.writeSegment(ctx, docs)
-		if err != nil {
-			return false, err
-		}
+	if ref.Documents > 0 {
 		segments = append(segments, ref)
 	}
 	segments = append(segments, m.Segments[at+2:]...)
@@ -835,7 +792,13 @@ func (i *Index) Reclaim(ctx context.Context, grace time.Duration) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := i.publish(ctx, m, etag); err != nil {
+	// Rotate the CAS token even for content-hash stores, while retaining the
+	// searchable generation used by snapshots and pagination cursors.
+	m.Barrier, err = randomID()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := i.writeManifest(ctx, m, etag); err != nil {
 		return 0, err
 	}
 	markers, err := i.store.List(ctx, i.prefix+"retired/")

@@ -36,3 +36,6 @@ if operations:
     print('\nピーク増分は、操作開始時に GC した後のヒープ使用量からの増加分の最大値です（1 ms 間隔の標本、未回収のゴミを含む）。'
           '各操作は新しい Index を開くため、前の操作のキャッシュは含みません。'
           'build は Apply に渡すバッチ分の本文を含みます。')
+
+if 'compact_write_amplification' in metrics:
+    print(f"\n統合中の書き込み量（manifest を含む） / 元文書の UTF-8 バイト数: {metrics['compact_write_amplification']:.3f} 倍")

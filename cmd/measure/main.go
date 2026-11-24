@@ -8,8 +8,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -21,12 +23,17 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-type meter struct {
+type measuredStore interface {
 	zenbun.Store
-	Gets, Received, Puts atomic.Int64
-	delay                time.Duration
-	serialize            bool
-	mu                   sync.Mutex
+	zenbun.StreamCreator
+}
+
+type meter struct {
+	measuredStore
+	Gets, Received, Puts, Written atomic.Int64
+	delay                         time.Duration
+	serialize                     bool
+	mu                            sync.Mutex
 }
 
 func (m *meter) Get(ctx context.Context, key string, r *zenbun.ByteRange) (zenbun.Object, error) {
@@ -43,14 +50,30 @@ func (m *meter) Get(ctx context.Context, key string, r *zenbun.ByteRange) (zenbu
 		case <-timer.C:
 		}
 	}
-	obj, err := m.Store.Get(ctx, key, r)
+	obj, err := m.measuredStore.Get(ctx, key, r)
 	m.Gets.Add(1)
 	m.Received.Add(int64(len(obj.Data)))
 	return obj, err
 }
 func (m *meter) Put(ctx context.Context, key string, data []byte, opts zenbun.PutOptions) (string, error) {
 	m.Puts.Add(1)
-	return m.Store.Put(ctx, key, data, opts)
+	m.Written.Add(int64(len(data)))
+	return m.measuredStore.Put(ctx, key, data, opts)
+}
+
+type countedWriter struct {
+	io.Writer
+	total *atomic.Int64
+}
+
+func (w countedWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.total.Add(int64(n))
+	return n, err
+}
+func (m *meter) CreateStream(ctx context.Context, key string, produce func(io.Writer) error) error {
+	m.Puts.Add(1)
+	return m.measuredStore.CreateStream(ctx, key, func(w io.Writer) error { return produce(countedWriter{w, &m.Written}) })
 }
 
 type document struct{ ID, Text string }
@@ -113,7 +136,7 @@ func run() error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dataDir) }()
-	var backend zenbun.Store
+	var backend measuredStore
 	if *endpoint != "" {
 		backend, err = s3store.New(s3store.Config{Endpoint: *endpoint, Bucket: "zenbun-measure", AccessKey: "testaccess", SecretKey: "testsecret"})
 		if err != nil {
@@ -131,7 +154,7 @@ func run() error {
 		return err
 	}
 	ctx := context.Background()
-	store := &meter{Store: backend}
+	store := &meter{measuredStore: backend}
 	open := func(prefix string) (*zenbun.Index, error) { return zenbun.Open(store, prefix) }
 
 	data, err := os.ReadFile(*queries)
@@ -296,6 +319,13 @@ func run() error {
 		return err
 	}
 
+	// Include the measurement update when comparing candidates before and after the merge.
+	for n, item := range items {
+		results[n], err = searchIndex.Search(ctx, item.Query)
+		if err != nil {
+			return err
+		}
+	}
 	compactions := 0
 	if err := measure("compact_all", func() error {
 		index, err := open("index/")
@@ -313,6 +343,19 @@ func run() error {
 		return err
 	}
 
+	after, err := open("index/")
+	if err != nil {
+		return err
+	}
+	for n, item := range items {
+		keys, err := after.Search(ctx, item.Query)
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(keys, results[n]) {
+			return fmt.Errorf("compact changed candidates for %q", item.Query)
+		}
+	}
 	runSync := func() error {
 		index, err := open("sync-index/")
 		if err != nil {
@@ -335,6 +378,9 @@ func run() error {
 
 	fraction, inverse := readRatio(sourceBytes, received, len(items))
 	metrics := map[string]any{"source_document_bytes": sourceBytes, "index_to_full_scan_fraction": fraction, "full_scan_to_index_ratio": inverse, "batch_size": *batch, "documents": documents, "queries": len(items), "false_negatives": 0, "search_gets": gets, "search_received_bytes": received, "gets_per_query": float64(gets) / float64(len(items)), "bytes_per_query": float64(received) / float64(len(items)), "single_update_puts": operations["apply_one"].Puts, "manifest_bytes": len(manifest.Data), "build_seconds": operations["build"].Seconds, "latency_sample_queries": sampleCount, "simulated_get_latency_ms": 20, "parallel_latency_seconds": parallelSeconds, "serialized_latency_seconds": serialSeconds, "compactions": compactions, "operations": operations}
+	if sourceBytes > 0 {
+		metrics["compact_write_amplification"] = float64(operations["compact_all"].WrittenBytes) / float64(sourceBytes)
+	}
 	encoded, err := json.MarshalIndent(metrics, "", "  ")
 	if err != nil {
 		return err

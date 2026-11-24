@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRankedSearchPaginationAndGeneration(t *testing.T) {
@@ -215,5 +216,54 @@ func TestRankedSearchExactAlternativePrecedesTaggedTitle(t *testing.T) {
 	}
 	if len(result.Documents) != 2 || result.Documents[0].Key != "z" {
 		t.Fatalf("unexpected order: %+v", result.Documents)
+	}
+}
+
+func TestRankedCursorSurvivesReclaim(t *testing.T) {
+	ctx := t.Context()
+	index, err := Open(&MemoryStore{}, "index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewSnapshotMirror(index, index.store, "copies")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Apply(ctx, []Change{{Key: "a", Data: []byte("cat")}, {Key: "b", Data: []byte("cat")}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := m.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := Query{All: [][]string{{"cat"}}}
+	decode := func(_ string, data []byte) (RankedFields, bool, error) {
+		return RankedFields{Title: string(data)}, true, nil
+	}
+	page, err := first.FindRanked(ctx, q, RankedOptions{Limit: 1}, decode)
+	if err != nil || page.Next == "" {
+		t.Fatalf("first page: %v %v", page, err)
+	}
+	_, etag, err := index.loadManifest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := index.Reclaim(ctx, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		state, next, err := index.loadManifest(ctx)
+		if err != nil || next == etag || state.Generation != first.Generation() {
+			t.Fatalf("barrier: %+v %q %v", state, next, err)
+		}
+		etag = next
+	}
+	current, err := m.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last, err := current.FindRanked(ctx, q, RankedOptions{After: page.Next}, decode)
+	if err != nil || len(last.Documents) != 1 || last.Documents[0].Key != "b" {
+		t.Fatalf("second page: %v %v", last, err)
 	}
 }
