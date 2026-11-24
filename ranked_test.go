@@ -6,13 +6,26 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+type rankedCopyReads struct {
+	Store
+	copies atomic.Int64
+}
+
+func (s *rankedCopyReads) Get(ctx context.Context, key string, r *ByteRange) (Object, error) {
+	if strings.HasPrefix(key, "copies/") {
+		s.copies.Add(1)
+	}
+	return s.Store.Get(ctx, key, r)
+}
+
 func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 	ctx := context.Background()
-	store := &MemoryStore{}
+	store := &rankedCopyReads{Store: &MemoryStore{}}
 	idx, _ := Open(store, "index/")
 	mirror, _ := NewSnapshotMirror(idx, store, "copies/")
 	fields := map[string]RankedFields{"a": {Title: "other", Text: "needle"}, "b": {Title: "needle guide"}, "c": {Title: "needle"}, "d": {Title: "other", Tags: []string{"needle"}}}
@@ -58,6 +71,15 @@ func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 	if !reflect.DeepEqual(got, []string{"c", "b", "d", "a"}) || second.Next != "" {
 		t.Fatalf("ranked pages: %v %q", got, second.Next)
 	}
+	store.copies.Store(0)
+	all, err := snap.RankedKeys(ctx, q, RankedOptions{MaxCandidates: len(fields)}, decode)
+	if err != nil || !reflect.DeepEqual(all, got) {
+		t.Fatalf("ranked keys: got %v, want %v, error %v", all, got, err)
+	}
+	// Every fixture has the query in its title, tags or body.
+	if reads, want := store.copies.Load(), int64(len(fields)); reads != want {
+		t.Fatalf("ranked copy reads: got %d, want one per candidate (%d)", reads, want)
+	}
 	if _, err := snap.FindRanked(ctx, q, RankedOptions{After: first.Next, Scope: "other"}, decode); !errors.Is(err, ErrSnapshotChanged) {
 		t.Fatalf("scope: %v", err)
 	}
@@ -67,6 +89,30 @@ func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 	newer, _ := mirror.Snapshot(ctx)
 	if _, err := newer.FindRanked(ctx, q, RankedOptions{After: first.Next}, decode); !errors.Is(err, ErrSnapshotChanged) {
 		t.Fatalf("generation: %v", err)
+	}
+}
+
+func TestRankedKeysRejectsInvalidArguments(t *testing.T) {
+	snapshot := &Snapshot{}
+	query := Query{All: [][]string{{"needle"}}}
+	decode := func(string, []byte) (RankedFields, bool, error) {
+		return RankedFields{}, false, nil
+	}
+	for _, tc := range []struct {
+		name    string
+		options RankedOptions
+		decode  func(string, []byte) (RankedFields, bool, error)
+	}{
+		{name: "limit", options: RankedOptions{Limit: 1}, decode: decode},
+		{name: "cursor", options: RankedOptions{After: "cursor"}, decode: decode},
+		{name: "missing decoder"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, err := snapshot.RankedKeys(t.Context(), query, tc.options, tc.decode)
+			if err == nil || len(keys) != 0 {
+				t.Fatalf("expected rejected arguments, got %v, %v", keys, err)
+			}
+		})
 	}
 }
 
