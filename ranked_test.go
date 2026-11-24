@@ -6,13 +6,26 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+type rankedCopyReads struct {
+	Store
+	copies atomic.Int64
+}
+
+func (s *rankedCopyReads) Get(ctx context.Context, key string, r *ByteRange) (Object, error) {
+	if strings.HasPrefix(key, "copies/") {
+		s.copies.Add(1)
+	}
+	return s.Store.Get(ctx, key, r)
+}
+
 func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 	ctx := context.Background()
-	store := &MemoryStore{}
+	store := &rankedCopyReads{Store: &MemoryStore{}}
 	idx, _ := Open(store, "index/")
 	mirror, _ := NewSnapshotMirror(idx, store, "copies/")
 	fields := map[string]RankedFields{"a": {Title: "other", Text: "needle"}, "b": {Title: "needle guide"}, "c": {Title: "needle"}, "d": {Title: "other", Tags: []string{"needle"}}}
@@ -57,6 +70,11 @@ func TestRankedSearchPaginationAndGeneration(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []string{"c", "b", "d", "a"}) || second.Next != "" {
 		t.Fatalf("ranked pages: %v %q", got, second.Next)
+	}
+	store.copies.Store(0)
+	all, err := snap.RankedKeys(ctx, q, RankedOptions{MaxCandidates: len(fields)}, decode)
+	if err != nil || !reflect.DeepEqual(all, got) || store.copies.Load() != int64(len(fields)) {
+		t.Fatalf("ranked keys: got %v, want %v, copy reads %d, error %v", all, got, store.copies.Load(), err)
 	}
 	if _, err := snap.FindRanked(ctx, q, RankedOptions{After: first.Next, Scope: "other"}, decode); !errors.Is(err, ErrSnapshotChanged) {
 		t.Fatalf("scope: %v", err)

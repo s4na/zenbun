@@ -76,17 +76,11 @@ type rankedHit struct {
 // scope or index generation invalidates the cursor. Every page reads all
 // candidate payloads, so common queries can be expensive.
 func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOptions, decode func(string, []byte) (RankedFields, bool, error)) (RankedResult, error) {
-	if decode == nil || options.Limit < 0 || options.Limit > 1000 || options.Concurrency < 0 || options.Concurrency > maxFindReads || options.MaxCandidates < 0 || options.MaxBytes < 0 {
-		return RankedResult{}, errors.New("zenbun: invalid ranked search options")
+	if err := validateRankedSearch(q, options, decode); err != nil {
+		return RankedResult{}, err
 	}
 	if options.Limit == 0 {
 		options.Limit = 20
-	}
-	if options.Concurrency == 0 {
-		options.Concurrency = defaultFindReads
-	}
-	if err := q.validate(); err != nil {
-		return RankedResult{}, err
 	}
 	queryBytes, err := json.Marshal(struct {
 		Query      Query
@@ -108,12 +102,86 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 			return RankedResult{}, ErrSnapshotChanged
 		}
 	}
-	keys, err := s.SearchQuery(ctx, q)
+	hits, bytesRead, err := s.rankCandidates(ctx, q, options, decode)
 	if err != nil {
 		return RankedResult{}, err
 	}
+	start := 0
+	if cursor.Key != "" {
+		found := false
+		for i, h := range hits {
+			if h.Key == cursor.Key {
+				start = i + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			return RankedResult{}, ErrSnapshotChanged
+		}
+	}
+	end := min(start+options.Limit, len(hits))
+	result := RankedResult{Documents: make([]RankedDocument, 0, end-start)}
+	for _, h := range hits[start:end] {
+		data, err := s.Get(ctx, h.Key)
+		if err != nil {
+			return RankedResult{}, err
+		}
+		bytesRead += int64(len(data))
+		if options.MaxBytes > 0 && bytesRead > options.MaxBytes {
+			return RankedResult{}, ErrRankedLimit
+		}
+		result.Documents = append(result.Documents, RankedDocument{Key: h.Key, Data: data})
+	}
+	if end < len(hits) {
+		raw, err := json.Marshal(rankedCursor{Generation: s.Generation(), Query: fingerprint, Key: hits[end-1].Key})
+		if err != nil {
+			return RankedResult{}, fmt.Errorf("zenbun: encode cursor: %w", err)
+		}
+		result.Next = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return result, nil
+}
+
+// RankedKeys verifies and ranks all candidates once, and returns the ordered
+// keys without reading their payloads a second time. Applications that render
+// summaries can capture them in decode and page those summaries in key order.
+// Limit and After must be zero. MaxCandidates and MaxBytes still bound the work.
+func (s *Snapshot) RankedKeys(ctx context.Context, q Query, options RankedOptions, decode func(string, []byte) (RankedFields, bool, error)) ([]string, error) {
+	if options.Limit != 0 || options.After != "" {
+		return nil, errors.New("zenbun: ranked keys do not accept pagination options")
+	}
+	if err := validateRankedSearch(q, options, decode); err != nil {
+		return nil, err
+	}
+	hits, _, err := s.rankCandidates(ctx, q, options, decode)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, len(hits))
+	for n, hit := range hits {
+		keys[n] = hit.Key
+	}
+	return keys, nil
+}
+
+func validateRankedSearch(q Query, options RankedOptions, decode func(string, []byte) (RankedFields, bool, error)) error {
+	if decode == nil || options.Limit < 0 || options.Limit > 1000 || options.Concurrency < 0 || options.Concurrency > maxFindReads || options.MaxCandidates < 0 || options.MaxBytes < 0 {
+		return errors.New("zenbun: invalid ranked search options")
+	}
+	return q.validate()
+}
+
+func (s *Snapshot) rankCandidates(ctx context.Context, q Query, options RankedOptions, decode func(string, []byte) (RankedFields, bool, error)) ([]rankedHit, int64, error) {
+	if options.Concurrency == 0 {
+		options.Concurrency = defaultFindReads
+	}
+	keys, err := s.SearchQuery(ctx, q)
+	if err != nil {
+		return nil, 0, err
+	}
 	if options.MaxCandidates > 0 && len(keys) > options.MaxCandidates {
-		return RankedResult{}, ErrRankedLimit
+		return nil, 0, ErrRankedLimit
 	}
 	hits := make([]rankedHit, 0, len(keys))
 	bodies := readAhead(ctx, keys, options.Concurrency, func(ctx context.Context, key string) ([]byte, bool, error) {
@@ -125,15 +193,15 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 	for _, key := range keys {
 		body := bodies.next()
 		if body.err != nil {
-			return RankedResult{}, body.err
+			return nil, 0, body.err
 		}
 		bytesRead += int64(len(body.data))
 		if options.MaxBytes > 0 && bytesRead > options.MaxBytes {
-			return RankedResult{}, ErrRankedLimit
+			return nil, 0, ErrRankedLimit
 		}
 		fields, include, err := decode(key, body.data)
 		if err != nil {
-			return RankedResult{}, err
+			return nil, 0, err
 		}
 		if !include {
 			continue
@@ -180,41 +248,7 @@ func (s *Snapshot) FindRanked(ctx context.Context, q Query, options RankedOption
 		}
 		return a.Key < b.Key
 	})
-	start := 0
-	if cursor.Key != "" {
-		found := false
-		for i, h := range hits {
-			if h.Key == cursor.Key {
-				start = i + 1
-				found = true
-				break
-			}
-		}
-		if !found {
-			return RankedResult{}, ErrSnapshotChanged
-		}
-	}
-	end := min(start+options.Limit, len(hits))
-	result := RankedResult{Documents: make([]RankedDocument, 0, end-start)}
-	for _, h := range hits[start:end] {
-		data, err := s.Get(ctx, h.Key)
-		if err != nil {
-			return RankedResult{}, err
-		}
-		bytesRead += int64(len(data))
-		if options.MaxBytes > 0 && bytesRead > options.MaxBytes {
-			return RankedResult{}, ErrRankedLimit
-		}
-		result.Documents = append(result.Documents, RankedDocument{Key: h.Key, Data: data})
-	}
-	if end < len(hits) {
-		raw, err := json.Marshal(rankedCursor{Generation: s.Generation(), Query: fingerprint, Key: hits[end-1].Key})
-		if err != nil {
-			return RankedResult{}, fmt.Errorf("zenbun: encode cursor: %w", err)
-		}
-		result.Next = base64.RawURLEncoding.EncodeToString(raw)
-	}
-	return result, nil
+	return hits, bytesRead, nil
 }
 
 // exactRankedTitle accepts one alternative from each group in order.
