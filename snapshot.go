@@ -178,7 +178,7 @@ func (s *Snapshot) Get(ctx context.Context, key string) ([]byte, error) {
 		if len(hash) != 64 || strings.Trim(hash, "0123456789abcdef") != "" {
 			return nil, errors.New("zenbun: invalid copy reference")
 		}
-		obj, err := s.mirror.store.Get(ctx, s.mirror.prefix+hash, nil)
+		obj, err := measuredGet(ctx, s.mirror.store, s.mirror.prefix+hash, nil, payloadRead)
 		if err != nil {
 			return nil, err
 		}
