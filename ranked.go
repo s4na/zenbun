@@ -249,6 +249,9 @@ func (s *Snapshot) rankCandidates(ctx context.Context, q Query, options RankedOp
 		}
 		return a.Key < b.Key
 	})
+	if stats := searchStatsFrom(ctx); stats != nil {
+		stats.matches.Add(int64(len(hits)))
+	}
 	return hits, bytesRead, nil
 }
 

@@ -67,7 +67,7 @@ func (m *SnapshotMirror) OpenSnapshot(ctx context.Context, generation string) (*
 	if len(generation) != 32 || strings.Trim(generation, "0123456789abcdef") != "" {
 		return nil, errors.New("zenbun: invalid snapshot generation")
 	}
-	obj, err := m.index.store.Get(ctx, m.index.prefix+"snapshots/"+generation, nil)
+	obj, err := measuredGet(ctx, m.index.store, m.index.prefix+"snapshots/"+generation, nil, indexRead)
 	if err != nil {
 		return nil, err
 	}

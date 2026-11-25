@@ -339,7 +339,7 @@ func readRange(ctx context.Context, store Store, key string, start, length int64
 	if !validExtent(start, length, int64(^uint64(0)>>1)) {
 		return nil, errors.New("zenbun: invalid segment extent")
 	}
-	obj, err := store.Get(ctx, key, &ByteRange{Start: start, End: start + length})
+	obj, err := measuredGet(ctx, store, key, &ByteRange{Start: start, End: start + length}, indexRead)
 	if err != nil {
 		return nil, err
 	}

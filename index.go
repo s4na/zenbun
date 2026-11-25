@@ -91,7 +91,7 @@ func randomID() (string, error) {
 }
 
 func (i *Index) loadManifest(ctx context.Context) (manifest, string, error) {
-	obj, err := i.store.Get(ctx, i.prefix+"manifest", nil)
+	obj, err := measuredGet(ctx, i.store, i.prefix+"manifest", nil, indexRead)
 	if errors.Is(err, ErrNotFound) {
 		return manifest{Version: manifestVersion}, "", nil
 	}
@@ -590,6 +590,9 @@ func (i *Index) searchManifest(ctx context.Context, m manifest, q Query) ([]stri
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	if stats := searchStatsFrom(ctx); stats != nil {
+		stats.candidates.Add(int64(len(keys)))
+	}
 	return keys, nil
 }
 
